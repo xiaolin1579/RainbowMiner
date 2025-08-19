@@ -40,8 +40,6 @@ if (($Pool_Request.algos | Measure-Object).Count -le 10 -or ($Pool_MiningRequest
 
 $Pool_PoolFee = 2.0
 
-$Grin29_Algorithm = (Get-Coin "GRIN").algo
-
 $Pool_Request.algos | Where-Object {([Double]$_.p -gt 0.00 -and [Double]$_.s -gt 0) -or $InfoOnly} | ForEach-Object {
     $Pool_Algo_Id   = $_.a
     $Pool_Data      = $Pool_MiningRequest.miningAlgorithms | Where-Object {$_.Enabled -and $_.order -eq $Pool_Algo_Id}
@@ -55,9 +53,6 @@ $Pool_Request.algos | Where-Object {([Double]$_.p -gt 0.00 -and [Double]$_.s -gt
 
     if (-not $InfoOnly -and (($Algorithm -and $Pool_Algorithm_Norm -notin $Algorithm) -or ($ExcludeAlgorithm -and $Pool_Algorithm_Norm -in $ExcludeAlgorithm))) {return}
 
-    #if ($Pool_Algorithm_Norm -eq "Sia") {$Pool_Algorithm_Norm = "SiaNiceHash"} #temp fix
-    #if ($Pool_Algorithm_Norm -eq "Decred") {$Pool_Algorithm_Norm = "DecredNiceHash"} #temp fix
-
     if (-not $InfoOnly) {
         $Stat = Set-Stat -Name "$($Name)_$($Pool_Algorithm_Norm)_Profit" -Value ([Double]$_.p / 1e8) -Duration $StatSpan -HashRate ([Double]$_.s) -ChangeDetection $true -Quiet
     }
@@ -66,26 +61,35 @@ $Pool_Request.algos | Where-Object {([Double]$_.p -gt 0.00 -and [Double]$_.s -gt
 
         $Pool_CoinSymbol = Switch ($Pool_Algorithm_Norm) {
             "BeamHash3"         {"BEAM"}
+            "Blake3Alephium"    {"ALPH"}
             "CuckooCycle"       {"AE"}
-            "Cuckaroo29"        {"XBG"}
-            "Cuckarood29"       {"MWC"}
-            "$Grin29_Algorithm" {"GRIN"}
             "Eaglesong"         {"CKB"}
-            "EquihashR25x5x3"   {"BEAM"}
+            "Fishhash"          {"IRON"}
+            "HeavyHashPyrin"    {"PYI"}
             "Lbry"              {"LBC"}
+            "NexaPow"           {"NEXA"}
             "RandomX"           {"XMR"}
             "Octopus"           {"CFX"}
+            "Verushash"         {"VRSC"}
         }
     
         $Pool_Coin = if ($Pool_CoinSymbol) {Get-Coin $Pool_CoinSymbol}
 
-        $Pool_EthProxy = $null
+        $Pool_EthProxy = $Pool_DagSizeMax = $Pool_CoinSymbolMax = $null
 
         if ($Pool_Algorithm_Norm -match $Global:RegexAlgoHasDAGSize) {
             $Pool_EthProxy = if ($Pool_Algorithm_Norm -match $Global:RegexAlgoIsEthash) {"ethstratumnh"} elseif ($Pool_Algorithm_Norm -match $Global:RegexAlgoIsProgPow) {"stratum"} else {$null}
+            if (-not $Pool_CoinSymbol) {
+                $Pool_CoinSymbolMax = Switch ($Pool_Algorithm_Norm) {
+                    "Etchash" {"ETC"}
+                    "Ethash"  {"ETHW"}
+                    "KawPow"  {"RVN"}
+                }
+                if ($Pool_CoinSymbolMax) {
+                    $Pool_DagSizeMax = Get-EthDAGSize -Algorithm $Pool_Algorithm -CoinSymbol $Pool_CoinSymbolMax
+                }
+            }
         }
-
-        $Pool_IsEthash = $Pool_Algorithm_Norm -match "^Etc?hash"
 
         $Pool_Host      = "$($Pool_Algorithm).auto.nicehash.com"
 
@@ -121,6 +125,8 @@ $Pool_Request.algos | Where-Object {([Double]$_.p -gt 0.00 -and [Double]$_.s -gt
                 BLK           = $null
                 PaysLive      = $true
                 EthMode       = $Pool_EthProxy
+                CoinSymbolMax = $Pool_CoinSymbolMax
+                DagSizeMax    = $Pool_DagSizeMax
                 Name          = $Name
                 Penalty       = 0
                 PenaltyFactor = 1
@@ -132,44 +138,6 @@ $Pool_Request.algos | Where-Object {([Double]$_.p -gt 0.00 -and [Double]$_.s -gt
                 Wallet        = $Pool_Wallet
                 Worker        = "{workername:$Worker}"
                 Email         = $Email
-            }
-            if ($Pool_IsEthash) {
-                [PSCustomObject]@{
-                    Algorithm     = "$($Pool_Algorithm_Norm)NH"
-					Algorithm0    = "$($Pool_Algorithm_Norm)NH"
-                    CoinName      = "$($Pool_Coin.Name)"
-                    CoinSymbol    = "$Pool_CoinSymbol"
-                    Currency      = "BTC"
-                    Price         = $Stat.$StatAverage
-                    StablePrice   = $Stat.$StatAverageStable
-                    MarginOfError = $Stat.Week_Fluctuation
-                    Protocol      = $Pool_Protocol
-                    Host          = $Pool_Host
-                    Port          = $Pool_Port
-                    User          = "$($Pool_Wallet).{workername:$Worker}"
-                    Pass          = "x"
-                    Region        = "US"
-                    SSL           = $Pool_SSL
-                    Updated       = $Stat.Updated
-                    PoolFee       = $Pool_PoolFee
-                    Workers       = $null
-                    Hashrate      = $Stat.HashRate_Live
-                    TSL           = $null
-                    BLK           = $null
-                    PaysLive      = $true
-                    EthMode       = $Pool_EthProxy
-                    Name          = $Name
-                    Penalty       = 0
-                    PenaltyFactor = 1
-					Disabled      = $false
-					HasMinerExclusions = $false
-                    Price_0       = 0.0
-					Price_Bias    = 0.0
-					Price_Unbias  = 0.0
-                    Wallet        = $Pool_Wallet
-                    Worker        = "{workername:$Worker}"
-                    Email         = $Email
-                }
             }
         }
     }

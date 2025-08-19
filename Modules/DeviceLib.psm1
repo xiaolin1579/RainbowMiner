@@ -957,6 +957,12 @@ function Update-DeviceInformation {
         $Global:GlobalGPUMethod = @{}
     }
 
+    $Pattern = @{
+        AMD    = '*Radeon*'
+        NVIDIA = '*GeForce*'
+        Intel  = '*Intel*'
+    }
+
     $Global:GlobalCachedDevices | Where-Object {$_.Type -eq "GPU" -and $DeviceName -icontains $_.Name} | Group-Object Vendor | Foreach-Object {
         $Devices = $_.Group
         $Vendor = $_.Name
@@ -993,24 +999,32 @@ function Update-DeviceInformation {
                                         $abReload = $false
                                     }
                                     $DeviceId = 0
-                                    $Pattern = @{
-                                        AMD    = '*Radeon*'
-                                        NVIDIA = '*GeForce*'
-                                        Intel  = '*Intel*'
-                                    }
                                     @($Script:abMonitor.GpuEntries | Where-Object Device -like $Pattern.$Vendor) | ForEach-Object {
                                         $CardData    = $Script:abMonitor.Entries | Where-Object GPU -eq $_.Index
+
+                                        $FanSpeedCur = [int]$($Script:abControl.GpuEntries[$_.Index].FanSpeedCur)
+                                        if (-not $FanSpeedCur) {
+                                            $FanSpeedCur = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?fan speed$").Data
+                                        }
+
                                         $PowerLimitPercent = [int]$($Script:abControl.GpuEntries[$_.Index].PowerLimitCur)
                                         $Utilization = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?usage$").Data
-                                        $PCIBusId    = if ($_.GpuId -match "&BUS_(\d+)&DEV_(\d+)") {"{0:x2}:{1:x2}" -f [int]$Matches[1],[int]$Matches[2]} else {$null}
+
+                                        # AMD seems to work somewhat with ab beta, so lets parse power - tested RX9060XT
+                                        $PowerDrawCur   = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?power$").Data
+                                        if ($PowerDrawCur -eq 0) {
+                                            $PowerDrawCur = $Script:AmdCardsTDP."$($_.Model_Name)" * ((100 + $PowerLimitPercent) * 0.01) * ($Utilization * 0.01)
+                                        }
 
                                         $Data = [PSCustomObject]@{
                                             Clock       = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?core clock$").Data
                                             ClockMem    = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?memory clock$").Data
-                                            FanSpeed    = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?fan speed$").Data
+                                            FanSpeed    = $FanSpeedCur
                                             Temperature = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?temperature$").Data
-                                            PowerDraw   = $Script:AmdCardsTDP."$($_.Model_Name)" * ((100 + $PowerLimitPercent) / 100) * ($Utilization / 100)
+                                            PowerDraw   = $PowerDrawCur
                                         }
+
+                                        $PCIBusId    = if ($_.GpuId -match "&BUS_(\d+)&DEV_(\d+)") {"{0:x2}:{1:x2}" -f [int]$Matches[1],[int]$Matches[2]} else {$null}
 
                                         $Devices | Where-Object {($_.BusId -and $PCIBusId -and ($_.BusId -eq $PCIBusId)) -or ((-not $_.BusId -or -not $PCIBusId) -and ($_.BusId_Type_Vendor_Index -eq $DeviceId))} | Foreach-Object {
                                             $NF = $_.Data.Method -eq ""
@@ -1181,10 +1195,83 @@ function Update-DeviceInformation {
 
                 if ($IsWindows) {
 
-                    #$Success = 0
-                    #if (-not $Success) {
-                    #    Write-Log -Level Warn "Could not read power data from INTEL"
-                    #}
+                    $Success = 0
+
+                    foreach ($Method in @("Afterburner")) {
+
+                        if (-not $Global:GlobalGPUMethod.ContainsKey($Method)) {$Global:GlobalGPUMethod.$Method = ""}
+
+                        if ($Global:GlobalGPUMethod.$Method -eq "fail") {Continue}
+                        if ($Method -eq "Afterburner" -and -not ($UseAfterburner -and $Script:abMonitor -and $Script:abControl)) {Continue}
+
+                        try {
+                            Switch ($Method) {
+                                "Afterburner" {
+                                    #
+                                    # try Afterburner
+                                    #
+                                    if ($abReload) {
+                                        if ($Script:abMonitor) {$Script:abMonitor.ReloadAll()}
+                                        if ($Script:abControl) {$Script:abControl.ReloadAll()}
+                                        $abReload = $false
+                                    }
+                                    $DeviceId = 0
+                                    @($Script:abMonitor.GpuEntries | Where-Object Device -like $Pattern.$Vendor) | ForEach-Object {
+                                        $CardData    = $Script:abMonitor.Entries | Where-Object GPU -eq $_.Index
+
+                                        $FanSpeedCur = [int]$($Script:abControl.GpuEntries[$_.Index].FanSpeedCur)
+                                        if (-not $FanSpeedCur) {
+                                            $FanSpeedCur = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?fan speed$").Data
+                                        }
+
+                                        $PowerLimitPercent = [int]$($Script:abControl.GpuEntries[$_.Index].PowerLimitCur)
+                                        $Utilization = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?usage$").Data
+
+                                        # AMD seems to work somewhat with ab beta, so lets parse power - tested RX9060XT
+                                        $PowerDrawCur   = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?power$").Data
+                                        if ($PowerDrawCur -eq 0) {
+                                            $PowerDrawCur = $Script:AmdCardsTDP."$($_.Model_Name)" * ((100 + $PowerLimitPercent) * 0.01) * ($Utilization * 0.01)
+                                        }
+
+                                        $Data = [PSCustomObject]@{
+                                            Clock       = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?core clock$").Data
+                                            ClockMem    = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?memory clock$").Data
+                                            FanSpeed    = $FanSpeedCur
+                                            Temperature = [int]$($CardData | Where-Object SrcName -match "^(GPU\d* )?temperature$").Data
+                                            PowerDraw   = $PowerDrawCur
+                                        }
+
+                                        $PCIBusId    = if ($_.GpuId -match "&BUS_(\d+)&DEV_(\d+)") {"{0:x2}:{1:x2}" -f [int]$Matches[1],[int]$Matches[2]} else {$null}
+
+                                        $Devices | Where-Object {($_.BusId -and $PCIBusId -and ($_.BusId -eq $PCIBusId)) -or ((-not $_.BusId -or -not $PCIBusId) -and ($_.BusId_Type_Vendor_Index -eq $DeviceId))} | Foreach-Object {
+                                            $NF = $_.Data.Method -eq ""
+                                            $Changed = $false
+                                            foreach($Value in @($Data.PSObject.Properties.Name)) {
+                                                if ($NF -or $_.Data.$Value -le 0 -or ($Value -match "^Clock" -and $Data.$Value -gt 0)) {$_.Data.$Value = $Data.$Value;$Changed = $true}
+                                            }
+
+                                            if ($Changed) {
+                                                $_.Data.Method = "$(if ($_.Data.Method) {"$($_.Data.Method);"})ab"
+                                            }
+                                        }
+                                        $DeviceId++
+                                    }
+                                    if ($DeviceId) {
+                                        $Global:GlobalGPUMethod.$Method = "ok"
+                                        $Success++
+                                    }
+                                }
+                            }
+
+                        } catch {
+                        }
+
+                        if ($Global:GlobalGPUMethod.$Method -eq "") {$Global:GlobalGPUMethod.$Method = "fail"}
+                    }
+
+                    if (-not $Success) {
+                        Write-Log -Level Warn "Could not read power data from INTEL"
+                    }
                 }
                 elseif ($IsLinux) {
 
@@ -1291,7 +1378,11 @@ function Update-DeviceInformation {
                     $Session.SysInfo.Cpus | Select-Object -Index $Device.Type_Index | Foreach-Object {
                         $Device.Data.Clock       = [int]$_.Clock
                         $Device.Data.Utilization = [Math]::Round($_.Utilization,1)
-                        $Device.Data.PowerDraw   = [Math]::Round($_.PowerDraw,2)
+                        if ($PowerAdjust["CPU"] -ne $null) {
+	                        $Device.Data.PowerDraw = [Math]::Round($_.PowerDraw * $PowerAdjust["CPU"] / 100, 2)
+                        } else {
+	                        $Device.Data.PowerDraw = [Math]::Round($_.PowerDraw,2)
+                        }
                         $Device.Data.Temperature = [int]$_.Temperature
                         $Device.Data.Method      = $_.Method
                     } 
@@ -1303,6 +1394,7 @@ function Update-DeviceInformation {
                     $Utilization = [Math]::Round([Math]::Min($Utilization, 100),1)
 
                     $PowerDraw   = if ($Session.SysInfo.Cpus[0].PowerDraw) {$Session.SysInfo.Cpus[0].PowerDraw} else {$CPU_tdp * $Utilization / 100}
+                    if ($PowerAdjust["CPU"] -ne $null) {$PowerDraw *= $PowerAdjust["CPU"] / 100}
 
                     $_.Data.Clock       = [int]$(if ($Session.SysInfo.Cpus -and $Session.SysInfo.Cpus[0].Clock) {$Session.SysInfo.Cpus[0].Clock} else {$Global:GlobalCPUInfo.MaxClockSpeed})
                     $_.Data.Utilization = $Utilization
@@ -1374,12 +1466,13 @@ function Get-AfterburnerDevices ($Type) {
         return
     }
 
+    $Pattern = @{
+        AMD    = "*Radeon*"
+        NVIDIA = "*GeForce*"
+        Intel  = "*Intel*"
+    }
+
     if ($Type -in @('AMD', 'NVIDIA', 'INTEL')) {
-        $Pattern = @{
-            AMD    = "*Radeon*"
-            NVIDIA = "*GeForce*"
-            Intel  = "*Intel*"
-        }
         @($Script:abMonitor.GpuEntries) | Where-Object Device -like $Pattern.$Type | ForEach-Object {
             $abIndex = $_.Index
             $Script:abMonitor.Entries | Where-Object {

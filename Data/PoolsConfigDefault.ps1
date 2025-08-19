@@ -80,6 +80,9 @@
         "Ethwmine" = [PSCustomObject]@{
             Currencies=@("ETHW")
         }
+        "Evepool" = [PSCustomObject]@{
+            Currencies=@("VKAX")
+        }
         "F2pool" = [PSCustomObject]@{
             Fields=[PSCustomObject]@{UserName=""}
             SetupFields=[PSCustomObject]@{UserName="Enter your f2pool username, if you want to see balances"}
@@ -481,7 +484,7 @@
             BalancesKeepAlive="90d"
         }
         "ZergPoolCoinsParty" = [PSCustomObject]@{
-            Fields=[PSCustomObject]@{AllowZero="1";PartyPassword="";AECurrency="";Penalty=12}
+            Fields=[PSCustomObject]@{PartyPassword="";AECurrency="";Penalty=12}
             SetupFields=[PSCustomObject]@{AECurrency="Optionally define your autoexchange currency symbol";PartyPassword="Enter your Party password"}
             Currencies=@("BTC")
             Autoexchange="BTC"
@@ -497,7 +500,7 @@
             BalancesKeepAlive="90d"
         }
         "ZergPoolParty" = [PSCustomObject]@{
-            Fields=[PSCustomObject]@{AllowZero="1";PartyPassword="";AECurrency="";Penalty=12}
+            Fields=[PSCustomObject]@{PartyPassword="";AECurrency="";Penalty=12}
             SetupFields=[PSCustomObject]@{AECurrency="Optionally define your autoexchange currency symbol";PartyPassword="Enter your Party password"}
             Currencies=@("BTC")
             Autoexchange="BTC"

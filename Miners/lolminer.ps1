@@ -14,14 +14,14 @@ $ManualUri = "https://bitcointalk.org/index.php?topic=4724735.0"
 $Port = "317{0:d2}"
 $Cuda = "10.0"
 $DevFee = 1.0
-$Version = "1.95a"
+$Version = "1.97"
 
 if ($IsLinux) {
     $Path = ".\Bin\GPU-lolMiner\lolMiner"
-    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v1.95a-lolminer/lolMiner_v1.95a_Lin64.tar.gz"
+    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v1.97-lolminer/lolMiner_v1.97_Lin64.tar.gz"
 } else {
     $Path = ".\Bin\GPU-lolMiner\lolMiner.exe"
-    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v1.95a-lolminer/lolMiner_v1.95a_Win64.zip"
+    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v1.97-lolminer/lolMiner_v1.97_Win64.zip"
 }
 
 $Commands = [PSCustomObject[]]@(
@@ -153,7 +153,7 @@ foreach ($Miner_Vendor in @("AMD","NVIDIA")) {
             foreach($MainAlgorithm_Norm in @($MainAlgorithm_Norm_0,"$($MainAlgorithm_Norm_0)-$($Miner_Model)","$($MainAlgorithm_Norm_0)-GPU")) {
                 if (-not $Pools.$MainAlgorithm_Norm.Host) {continue}
 
-                $MinMemGB = if ($_.DAG) {Get-EthDAGSize -CoinSymbol $Pools.$MainAlgorithm_Norm.CoinSymbol -Algorithm $MainAlgorithm_Norm_0 -Minimum $_.MinMemGb} else {$_.MinMemGb}
+                $MinMemGB = if ($_.DAG) {if ($Pools.$MainAlgorithm_Norm.DagSizeMax) {$Pools.$MainAlgorithm_Norm.DagSizeMax} else {Get-EthDAGSize -CoinSymbol $Pools.$MainAlgorithm_Norm.CoinSymbol -Algorithm $MainAlgorithm_Norm_0 -Minimum $_.MinMemGb}} else {$_.MinMemGb}
                 #Zombie-Mode since v1.11
                 if ($_.DAG -and ($MinMemGB -gt $_.MinMemGb) -and (($MainAlgorithm_Norm_0 -match $Global:RegexAlgoIsEthash -and $Session.Config.EnableEthashZombieMode) -or ($_.ZombieMode -and $Miner_Vendor -in $_.ZombieMode))) {
                     $MinMemGB = $_.MinMemGb
