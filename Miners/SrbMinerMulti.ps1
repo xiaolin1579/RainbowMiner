@@ -13,15 +13,15 @@ if (-not $Global:DeviceCache.DevicesByTypes.AMD -and -not $Global:DeviceCache.De
 $ManualUri = "https://bitcointalk.org/index.php?topic=5190081.0"
 $Port = "349{0:d2}"
 $DevFee = 0.85
-$Version = "2.9.5"
+$Version = "2.9.8"
 $Cuda = "11.7"
 
 if ($IsLinux) {
     $Path = ".\Bin\ANY-SRBMinerMulti\SRBMiner-MULTI"
-    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v2.9.5-srbminermulti/SRBMiner-Multi-2-9-5-Linux.tar.gz"
+    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v2.9.8-srbminermulti/SRBMiner-Multi-2-9-8-Linux.tar.gz"
 } else {
     $Path = ".\Bin\ANY-SRBMinerMulti\SRBMiner-MULTI.exe"
-    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v2.9.5-srbminermulti/SRBMiner-Multi-2-9-5-win64.zip"
+    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v2.9.8-srbminermulti/SRBMiner-Multi-2-9-8-win64.zip"
 }
 
 $Commands = [PSCustomObject[]]@(
@@ -40,6 +40,7 @@ $Commands = [PSCustomObject[]]@(
     [PSCustomObject]@{MainAlgorithm = "randomscash"      ;              Params = "--randomx-use-1gb-pages"; Fee = 0.85; Vendor = @("CPU")} #RandomScash
     [PSCustomObject]@{MainAlgorithm = "randomsfx"        ;              Params = "--randomx-use-1gb-pages"; Fee = 0.85; Vendor = @("CPU")} #RandomSFX
     #[PSCustomObject]@{MainAlgorithm = "randomtuske"      ;              Params = "--randomx-use-1gb-pages"; Fee = 0.85; Vendor = @("CPU")} #randomTuske
+    [PSCustomObject]@{MainAlgorithm = "randomvirel"      ;              Params = "--randomx-use-1gb-pages"; Fee = 0.85; Vendor = @("CPU")} #RandomVirel/VRL
     [PSCustomObject]@{MainAlgorithm = "randomx"          ;              Params = "--randomx-use-1gb-pages"; Fee = 0.85; Vendor = @("CPU")} #RandomX
     [PSCustomObject]@{MainAlgorithm = "randomxeq"        ;              Params = "--randomx-use-1gb-pages"; Fee = 0.85; Vendor = @("CPU"); ExcludePoolName = "C3pool|Moneroocean"} #RandomXEQ
     [PSCustomObject]@{MainAlgorithm = "randomy"          ;              Params = "--randomx-use-1gb-pages"; Fee = 1.00; Vendor = @("CPU")} #RandomY
@@ -50,7 +51,9 @@ $Commands = [PSCustomObject[]]@(
     [PSCustomObject]@{MainAlgorithm = "yespower"         ;              Params = ""; Fee = 0.85;               Vendor = @("CPU")} #yespower
     [PSCustomObject]@{MainAlgorithm = "yespower2b"       ;              Params = ""; Fee = 0.85;               Vendor = @("CPU")} #yespower2b
     [PSCustomObject]@{MainAlgorithm = "yespoweradvc"     ;              Params = ""; Fee = 0.85;               Vendor = @("CPU")} #yespoweradvc
+    [PSCustomObject]@{MainAlgorithm = "yespowereqpay"    ;              Params = ""; Fee = 2.00;               Vendor = @("CPU")} #yespowerEQPAY
     [PSCustomObject]@{MainAlgorithm = "yespoweric"       ;              Params = ""; Fee = 0.00;               Vendor = @("CPU")} #yespoweric
+    [PSCustomObject]@{MainAlgorithm = "yespowerinterchained" ;          Params = ""; Fee = 0.85;               Vendor = @("CPU")} #yespowerinterchained
     #[PSCustomObject]@{MainAlgorithm = "yespowerltncg"    ;              Params = ""; Fee = 0.85;               Vendor = @("CPU")} #yespowerltncg temporary disabled. Produces invalid shares
     [PSCustomObject]@{MainAlgorithm = "yespowermgpc"     ;              Params = ""; Fee = 0.85;               Vendor = @("CPU")} #YespowerMGPC/MagPieCoin
     [PSCustomObject]@{MainAlgorithm = "yespowerr16"      ;              Params = ""; Fee = 0.85;               Vendor = @("CPU")} #yespowerr16
@@ -66,7 +69,7 @@ $Commands = [PSCustomObject[]]@(
     #[PSCustomObject]@{MainAlgorithm = "aurum"            ;              Params = ""; Fee = 2.00;               Vendor = @("AMD","CPU","INTEL","NVIDIA")} #Aurum/BIT
     [PSCustomObject]@{MainAlgorithm = "autolykos2"       ; DAG = $true; Params = ""; Fee = 1.00;               Vendor = @("AMD","INTEL","NVIDIA"); ExcludePoolName="Nicehash"} #Autolykos2/ERGO
     [PSCustomObject]@{MainAlgorithm = "blake3_decred"    ;              Params = ""; Fee = 1.00; MinMemGb = 2; Vendor = @("AMD","INTEL","NVIDIA")} #Blake3Decred/DCR
-    [PSCustomObject]@{MainAlgorithm = "blake3_lbrt"      ;              Params = ""; Fee = 2.00; MinMemGb = 2; Vendor = @("AMD","INTEL","NVIDIA")} #Blake3Lbrt/LBRT
+    #[PSCustomObject]@{MainAlgorithm = "blake3_lbrt"      ;              Params = ""; Fee = 2.00; MinMemGb = 2; Vendor = @("AMD","INTEL","NVIDIA")} #Blake3Lbrt/LBRT
     #[PSCustomObject]@{MainAlgorithm = "blocx_autolykos2" ; DAG = $true; Params = ""; Fee = 1.00;               Vendor = @("AMD","INTEL","NVIDIA"); ExcludePoolName="Nicehash"} #BlocxAutolykos2/BLOCKX
     #[PSCustomObject]@{MainAlgorithm = "cryptixhash"      ;              Params = ""; Fee = 1.00;               Vendor = @("AMD","INTEL","NVIDIA")} #CryptixHash/CYTX (from 01/30/2025)
     [PSCustomObject]@{MainAlgorithm = "cryptonight_ccx"  ;              Params = ""; Fee = 0.85;               Vendor = @("AMD","CPU")} #CryptonightCCX
@@ -82,7 +85,7 @@ $Commands = [PSCustomObject[]]@(
     [PSCustomObject]@{MainAlgorithm = "ethash4g"         ; DAG = $true; Params = ""; Fee = 0.65; MinMemGb = 3; Vendor = @("AMD","INTEL","NVIDIA"); Algorithm = "ethash"; ExcludePoolName = "Gteh"} #ethash for low memory coins
     [PSCustomObject]@{MainAlgorithm = "ethash5g"         ; DAG = $true; Params = ""; Fee = 0.65; MinMemGb = 4; Vendor = @("AMD","INTEL","NVIDIA"); Algorithm = "ethash"; ExcludePoolName = "Gteh"} #ethash for low memory coins
     [PSCustomObject]@{MainAlgorithm = "ethashlowmemory"  ; DAG = $true; Params = ""; Fee = 0.65; MinMemGb = 2; Vendor = @("AMD","INTEL","NVIDIA"); Algorithm = "ethash"; ExcludePoolName = "Gteh"} #ethash for low memory coins
-    [PSCustomObject]@{MainAlgorithm = "ethashb3"         ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 3; Vendor = @("AMD","INTEL","NVIDIA")} #ethashb3/RTH
+    #[PSCustomObject]@{MainAlgorithm = "ethashb3"         ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 3; Vendor = @("AMD","INTEL","NVIDIA")} #ethashb3/RTH
     [PSCustomObject]@{MainAlgorithm = "ethashr5"         ; DAG = $true; Params = ""; Fee = 2.00; MinMemGb = 3; Vendor = @("AMD","INTEL","NVIDIA")} #ethashb3/RTH
     [PSCustomObject]@{MainAlgorithm = "evrprogpow"       ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 2; Vendor = @("AMD","INTEL","NVIDIA")} #EthashR5/R5
     [PSCustomObject]@{MainAlgorithm = "firopow"          ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 3; Vendor = @("AMD","INTEL","NVIDIA")} #FiroPow/FIRO
@@ -100,7 +103,7 @@ $Commands = [PSCustomObject[]]@(
     [PSCustomObject]@{MainAlgorithm = "memehash"         ;              Params = ""; Fee = 0.85;               Vendor = @("AMD","CPU","INTEL","NVIDIA")} #MemeHash/PEPEPOW
     [PSCustomObject]@{MainAlgorithm = "nxlhash"          ;              Params = ""; Fee = 1.00;               Vendor = @("AMD","INTEL","NVIDIA")} #NxlHash/NXL (from 10/15/2024)
     [PSCustomObject]@{MainAlgorithm = "meowpow"          ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 2; Vendor = @("AMD","INTEL","NVIDIA")} #MeowPow/MEWC
-    [PSCustomObject]@{MainAlgorithm = "phihash"          ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 4; Vendor = @("AMD","NVIDIA")} #PhilHash/PHI (from 01/30/2025)
+    [PSCustomObject]@{MainAlgorithm = "phihash"          ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 2; Vendor = @("AMD","NVIDIA")} #PhilHashV2/PHI (from 01/30/2025)
     [PSCustomObject]@{MainAlgorithm = "progpow_epic"     ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 2; Vendor = @("AMD","INTEL","NVIDIA")} #ProgPowEPIC/EPIC
     [PSCustomObject]@{MainAlgorithm = "progpow_quai"     ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 2; Vendor = @("AMD","INTEL","NVIDIA")} #ProgPowQuai/QUAI
     [PSCustomObject]@{MainAlgorithm = "progpow_sero"     ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 2; Vendor = @("AMD","NVIDIA")} #ProgPowSERO/SERO
@@ -108,7 +111,7 @@ $Commands = [PSCustomObject[]]@(
     [PSCustomObject]@{MainAlgorithm = "progpow_veil"     ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 2; Vendor = @("AMD","NVIDIA")} #ProgPowVEIL/VEIL
     [PSCustomObject]@{MainAlgorithm = "progpow_zano"     ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 2; Vendor = @("AMD","INTEL","NVIDIA")} #ProgPowZANO/ZANO
     [PSCustomObject]@{MainAlgorithm = "sccpow"           ; DAG = $true; Params = ""; Fee = 0.85; MinMemGb = 3; Vendor = @("AMD","INTEL","NVIDIA"); Algorithm = "firopow"} #SCCPow/SCC
-    [PSCustomObject]@{MainAlgorithm = "sha256dt"         ;              Params = ""; Fee = 0.85;               Vendor = @("AMD","INTEL","NVIDIA")} #SHA256dt/NOVO
+    #[PSCustomObject]@{MainAlgorithm = "sha256dt"         ;              Params = ""; Fee = 0.85;               Vendor = @("AMD","INTEL","NVIDIA")} #SHA256dt/NOVO
     [PSCustomObject]@{MainAlgorithm = "sha3x"            ;              Params = ""; Fee = 0.65;               Vendor = @("AMD","INTEL","NVIDIA")} #SHA3x/XTM
     [PSCustomObject]@{MainAlgorithm = "verthash"         ;              Params = ""; Fee = 1.00;               Vendor = @("AMD","INTEL","NVIDIA")} #Verthash
     [PSCustomObject]@{MainAlgorithm = "walahash"         ;              Params = ""; Fee = 1.00;               Vendor = @("AMD","INTEL","NVIDIA")} #WalaHash/WALA
@@ -159,8 +162,8 @@ $Commands = [PSCustomObject[]]@(
     [PSCustomObject]@{MainAlgorithm = "ethash5g"         ; DAG = $true; Params = ""; Fee = 0.65; MinMemGb = 4; Vendor = @("AMD","NVIDIA"); SecondaryAlgorithm = "heavyhash"; Algorithm = "ethash"; ExcludePoolName = "Gteh"} #ethash for low memory coins + HeavyHash/OBTC
     [PSCustomObject]@{MainAlgorithm = "ethash5g"         ; DAG = $true; Params = ""; Fee = 0.65; MinMemGb = 3; Vendor = @("AMD","NVIDIA"); SecondaryAlgorithm = "sha256dt"; Algorithm = "ethash"; ExcludePoolName = "Gteh"} #ethash for low memory coins + SHA256dt/NOVO
 
-    [PSCustomObject]@{MainAlgorithm = "ethashb3"         ; DAG = $true; Params = ""; Fee = 1.00; MinMemGb = 3; Vendor = @("AMD","INTEL","NVIDIA"); SecondaryAlgorithm = "blake3_decred"; ExcludePoolName = "Gteh"} #ethashb3 + Decred/DCR
-    [PSCustomObject]@{MainAlgorithm = "ethashb3"         ; DAG = $true; Params = ""; Fee = 1.00; MinMemGb = 3; Vendor = @("AMD","INTEL","NVIDIA"); SecondaryAlgorithm = "sha256dt"; ExcludePoolName = "Gteh"} #ethashb3 + NOVO
+    #[PSCustomObject]@{MainAlgorithm = "ethashb3"         ; DAG = $true; Params = ""; Fee = 1.00; MinMemGb = 3; Vendor = @("AMD","INTEL","NVIDIA"); SecondaryAlgorithm = "blake3_decred"; ExcludePoolName = "Gteh"} #ethashb3 + Decred/DCR
+    #[PSCustomObject]@{MainAlgorithm = "ethashb3"         ; DAG = $true; Params = ""; Fee = 1.00; MinMemGb = 3; Vendor = @("AMD","INTEL","NVIDIA"); SecondaryAlgorithm = "sha256dt"; ExcludePoolName = "Gteh"} #ethashb3 + NOVO
 
     [PSCustomObject]@{MainAlgorithm = "ethashlowmemory"  ; DAG = $true; Params = ""; Fee = 0.65; MinMemGb = 3; Vendor = @("AMD","INTEL","NVIDIA"); SecondaryAlgorithm = "blake3_decred"; Algorithm = "ethash"; ExcludePoolName = "Gteh"} #ethashlowmemory + Decred/DCR
     [PSCustomObject]@{MainAlgorithm = "ethashlowmemory"  ; DAG = $true; Params = ""; Fee = 0.65; MinMemGb = 2; Vendor = @("AMD","NVIDIA"); SecondaryAlgorithm = "heavyhash"; Algorithm = "ethash"; ExcludePoolName = "Gteh"} #ethash for low memory coins + HeavyHash/OBTC

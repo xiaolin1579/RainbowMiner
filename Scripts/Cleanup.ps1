@@ -1904,6 +1904,44 @@ try {
         }
     }
 
+    if ($Version -le (Get-Version "4.9.9.5")) {
+        $rmLHM = ".\Includes\getcpu\LibreHardwareMonitorLib.sys"
+        if (Test-Path $rmLHM) {
+            Get-ChildItem $rmLHM -File | Foreach-Object {Remove-Item $_.FullName -Force -ErrorAction Ignore;$ChangesTotal++}
+        }
+    }
+
+    if ($Version -le (Get-Version "4.9.9.7")) {
+        $RemovePoolStats += @("ZergPool_*_Profit.txt")
+        $RemovePoolStats += @("ZergPoolParty_*_Profit.txt")
+        $RemovePoolStats += @("ZergPoolSolo_*_Profit.txt")
+        $RemovePoolStats += @("ZergPoolCoinsParty_*_Profit.txt")
+        $RemovePoolStats += @("ZergPoolCoinsSolo_*_Profit.txt")
+
+        $rmOHM = ".\Includes\getcpu\OpenHardwareMonitorLib.sys"
+        if (Test-Path $rmOHM) {
+            Get-ChildItem $rmOHM -File | Foreach-Object {Remove-Item $_.FullName -Force -ErrorAction Ignore;$ChangesTotal++}
+        }
+
+        $rmOHM = ".\Includes\getcpu\OpenHardwareMonitorLib.dll"
+        if (Test-Path $rmOHM) {
+            Get-ChildItem $rmOHM -File | Foreach-Object {Remove-Item $_.FullName -Force -ErrorAction Ignore;$ChangesTotal++}
+        }
+    }
+
+    if ($Version -le (Get-Version "4.9.9.9")) {
+        $Changes = 0
+        $ConfigActual = Get-Content "$ConfigFile" -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($ConfigActual.ShowRemoteMachines -eq "0") {
+            $ConfigActual.ShowRemoteMachines = "`$ShowRemoteMachines";
+            $Changes++;
+        }
+        if ($Changes) {
+            $ConfigActual | ConvertTo-Json -Depth 10 | Set-Content $ConfigFile -Encoding UTF8
+            $ChangesTotal += $Changes
+        }
+    }
+
     ###
     ### END OF VERSION CHECKS
     ###
