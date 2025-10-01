@@ -52,7 +52,6 @@ $Pool_Regions = @("eu")
 $Pool_Regions | Foreach-Object {$Pool_RegionsTable.$_ = Get-Region $_}
 
 $Pool_Currencies = @("DOGE") + @($PoolCoins_Request.PSObject.Properties | Where-Object {$_.Value.conversion_disabled -ne "1"} | Foreach-Object {if ($_.Value.symbol -eq $null){$_.Name} else {$_.Value.symbol}} | Select-Object -Unique) | Select-Object -Unique | Where-Object {$Wallets.$_ -or $InfoOnly}
-
 if ($AECurrency -eq "") {$AECurrency = $Pool_Currencies | Select-Object -First 1}
 
 $PoolCoins_Request.PSObject.Properties.Name | Where-Object {$PoolCoins_Request.$_.algo -and ((-not $CoinSymbol -or $_ -in $CoinSymbol) -and (-not $ExcludeCoinSymbol -or $_ -notin $ExcludeCoinSymbol) -or $InfoOnly)} | ForEach-Object {
