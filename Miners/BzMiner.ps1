@@ -17,14 +17,14 @@ $ManualUri = "https://github.com/bzminer/bzminer/releases"
 $Port = "332{0:d2}"
 $DevFee = 0.5
 $Cuda = "11.2"
-$Version = "100.16"
+$Version = "100.20"
 
 if ($IsLinux) {
     $Path = ".\Bin\GPU-BzMiner\bzminer"
-    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v100.16-bzminer/bzminer_v100.16_linux.tar.gz"
+    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v100.20-bzminer/bzminer_v100.20_linux.tar.gz"
 } else {
     $Path = ".\Bin\GPU-BzMiner\bzminer.exe"
-    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v100.16-bzminer/bzminer_v100.16_windows.zip"
+    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v100.20-bzminer/bzminer_v100.20_windows.zip"
 }
 
 $ExcludePoolName = "prohashing|miningrigrentals"
@@ -36,6 +36,10 @@ $ExcludePoolName = "prohashing|miningrigrentals"
 # v100.16 adds cuda/opencl backends to randomx (and its rx/0, xmr, zeph, sal
 # aliases), but upstream calls that experimental and the shipped readme still says
 # RandomX cannot use a GPU - it stays CPU-only here until it has been benchmarked.
+# v100.20 adds quantus (Poseidon2 over Goldilocks, on LuckyPool and Kryptex stratum),
+# nexa on CPU and NVIDIA, and c29 - Tari's original Cuckaroo29. Careful with that one:
+# "c29" resolves to Cuckaroom29 in algorithms.json, so it mines as "cuckaroo29" here
+# and hands the miner its own name through Algorithm.
 $Commands = [PSCustomObject[]]@(
     [PSCustomObject]@{MainAlgorithm = "cn-heavy/0";   MinMemGb = 3.3; Params = ""; Vendor = @("AMD","CPU","INTEL","NVIDIA"); ExtendInterval = 2; Fee = 1.0} #CryptoNightHeavy
     [PSCustomObject]@{MainAlgorithm = "cn-heavy/xhv"; MinMemGb = 3.3; Params = ""; Vendor = @("AMD","CPU","INTEL","NVIDIA"); ExtendInterval = 2; Fee = 1.0} #CryptoNightHeavyXhv/XHV
@@ -52,11 +56,14 @@ $Commands = [PSCustomObject[]]@(
     [PSCustomObject]@{MainAlgorithm = "cn/upx2";      MinMemGb = 1.5; Params = ""; Vendor = @("AMD","CPU","INTEL","NVIDIA"); ExtendInterval = 2; Fee = 1.0} #CryptoNightLiteUpx2/UPX
     [PSCustomObject]@{MainAlgorithm = "cn/xao";       MinMemGb = 1.5; Params = ""; Vendor = @("AMD","CPU","INTEL","NVIDIA"); ExtendInterval = 2; Fee = 1.0} #CryptoNightXao
     [PSCustomObject]@{MainAlgorithm = "cn/zls";       MinMemGb = 1.5; Params = ""; Vendor = @("AMD","CPU","INTEL","NVIDIA"); ExtendInterval = 2; Fee = 1.0} #CryptonightZelerius
+    [PSCustomObject]@{MainAlgorithm = "cuckaroo29"; Algorithm = "c29"; MinMemGb = 6; Params = ""; Vendor = @("AMD","NVIDIA"); ExtendInterval = 2; Fee = 1.0} #Cuckaroo29/XTM
     [PSCustomObject]@{MainAlgorithm = "ergo";    DAG = $true; MinMemGb = 2; Params = ""; Vendor = @("AMD","INTEL","NVIDIA"); ExtendInterval = 2; Fee = 1.0} #Autolykos2/ERG
     [PSCustomObject]@{MainAlgorithm = "etchash"; DAG = $true; MinMemGb = 3; Params = ""; Vendor = @("AMD","NVIDIA");         ExtendInterval = 2; Fee = 0.5} #Etchash/ETC
     [PSCustomObject]@{MainAlgorithm = "ethash";  DAG = $true; MinMemGb = 3; Params = ""; Vendor = @("AMD","NVIDIA");         ExtendInterval = 2; Fee = 0.5} #Ethash/ETHW
     [PSCustomObject]@{MainAlgorithm = "kawpow";  DAG = $true; MinMemGb = 3; Params = ""; Vendor = @("AMD","INTEL","NVIDIA"); ExtendInterval = 2; Fee = 1.0} #KawPow
+    [PSCustomObject]@{MainAlgorithm = "nexa";    DAG = $true; MinMemGb = 2; Params = ""; Vendor = @("CPU","NVIDIA");         ExtendInterval = 2; Fee = 2.0} #NexaPoW/NEXA
     [PSCustomObject]@{MainAlgorithm = "pearl";                MinMemGb = 2; Params = ""; Vendor = @("AMD","CPU","INTEL","NVIDIA"); ExtendInterval = 2; Fee = 1.0; ExcludePoolName = "84.32.220.219|129.226.55.135"} #PearlHash/PRL
+    [PSCustomObject]@{MainAlgorithm = "quantus";              MinMemGb = 2; Params = ""; Vendor = @("AMD","CPU","NVIDIA");   ExtendInterval = 2; Fee = 2.0} #Quantus/QUAN
     [PSCustomObject]@{MainAlgorithm = "randomx";              MinMemGb = 2; Params = ""; Vendor = @("CPU");                  ExtendInterval = 2; Fee = 1.0} #RandomX/XMR
     [PSCustomObject]@{MainAlgorithm = "verus";                MinMemGb = 1; Params = ""; Vendor = @("CPU");                  ExtendInterval = 2; Fee = 1.0} #VerusHash/VRSC
     [PSCustomObject]@{MainAlgorithm = "warthog";              MinMemGb = 2; Params = ""; Vendor = @("AMD","INTEL","NVIDIA"); ExtendInterval = 2; Fee = 2.0; WithCPU = $true; NoCPUMining = $true} #JanusHash/WART, needs GPU and CPU together
