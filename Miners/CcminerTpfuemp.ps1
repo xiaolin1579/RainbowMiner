@@ -36,7 +36,7 @@ $Commands = [PSCustomObject[]]@(
     [PSCustomObject]@{MainAlgorithm = "curvehash"; Params = "-a curvehash "; ExtendInterval = 2} #curvehash
     [PSCustomObject]@{MainAlgorithm = "evrprogpow"; Params = "-a evrprogpow "; ExtendInterval = 2} #evrprogpow
     [PSCustomObject]@{MainAlgorithm = "firopow"; Params = "-a firopow "; ExtendInterval = 2} #firopow
-    [PSCustomObject]@{MainAlgorithm = "hoohashpepew"; Params = "-a pepew "; ExtendInterval = 2} #hoohashpepew
+    [PSCustomObject]@{MainAlgorithm = "hoohashpepew"; Params = "-a hoohash "; ExtendInterval = 2} #hoohashpepew
     [PSCustomObject]@{MainAlgorithm = "kawpow"; Params = "-a kawpow "; ExtendInterval = 2} #kawpow
     [PSCustomObject]@{MainAlgorithm = "meowpow"; Params = "-a meowpow "; ExtendInterval = 2} #meowpow
     [PSCustomObject]@{MainAlgorithm = "meraki"; Params = "-a meraki "; ExtendInterval = 2} #meraki
