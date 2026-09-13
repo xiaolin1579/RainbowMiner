@@ -34,6 +34,10 @@ $Commands = [PSCustomObject[]]@(
     [PSCustomObject]@{MainAlgorithm = "soterg"; Params = "-a soterg "; ExtendInterval = 2} #soterg
     [PSCustomObject]@{MainAlgorithm = "whirlpoolx2"; Params = "-a whirlpoolx2 "; ExtendInterval = 2} #whirlpoolx2
     [PSCustomObject]@{MainAlgorithm = "x25x"; Params = "-a x25x "; ExtendInterval = 2} #x25x
+    [PSCustomObject]@{MainAlgorithm = "yescrypt"; Params = "-a yescrypt "; ExtendInterval = 2} #yescrypt
+    [PSCustomObject]@{MainAlgorithm = "yescryptr8"; Params = "-a yescryptr8 "; ExtendInterval = 2} #yescryptr8
+    [PSCustomObject]@{MainAlgorithm = "yescryptr16"; Params = "-a yescryptr16 "; ExtendInterval = 2} #yescryptr16
+    [PSCustomObject]@{MainAlgorithm = "yescryptr32"; Params = "-a yescryptr32 "; ExtendInterval = 2} #yescryptr32
 )
 
 if (-not $InfoOnly) {
