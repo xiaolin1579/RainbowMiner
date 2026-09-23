@@ -35,7 +35,7 @@ RUN git clone https://github.com/xiaolin1579/RainbowMiner.git .
 RUN mkdir -p /opt/RainbowMiner/Config
 
 # คัดลอก config.default.txt ไปวางในตำแหน่งที่ถูกต้อง
-COPY Config1/config.txt /opt/RainbowMiner/Config/config.default.txt
+COPY Config/config.txt /opt/RainbowMiner/Config/config.default.txt
 
 # รันไฟล์ติดตั้ง
 RUN apt-get update && chmod +x *.sh && ./install.sh
