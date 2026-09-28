@@ -813,6 +813,17 @@ function Get-Device {
                         $Global:GlobalCPUInfo.Topology = $topo
                         $topo_online = $topo | Where-Object { $_.online }
 
+                        # drop the CPUs a cpuset keeps away from this process (containers, taskset)
+                        $allowedCpus = Get-LinuxAllowedCpus
+                        if ($allowedCpus) {
+                            $topo_allowed = @($topo_online | Where-Object { $allowedCpus.Contains([int]$_.cpu) })
+                            if ($topo_allowed.Count -and $topo_allowed.Count -lt @($topo_online).Count) {
+                                Write-Log -Level Info "CPU set limits RainbowMiner to $($topo_allowed.Count) of $(@($topo_online).Count) CPUs ($($allowedCpus.Count) allowed)"
+                                $topo_online = $topo_allowed
+                            }
+                            $topo_allowed = $null
+                        }
+
                         $allCpus = @(
                             $topo_online | 
                                 Sort-Object socket, core, thread, cpu |
@@ -839,6 +850,13 @@ function Get-Device {
                             $Global:GlobalCPUInfo.Threads = $allCpus.Count
                             $Global:GlobalCPUInfo.PhysicalCPUs = [Math]::Max(1,($topo_online | Select-Object -ExpandProperty socket -Unique).Count)
 
+                            # getcpuinfo.sh only knows the thread count: mirror the exact values into the
+                            # raw block, which /cpuinfo and devicedata.json show
+                            if ($Global:GlobalCPUInfo.Information) {
+                                foreach ($Field in @("Cores","Threads","PhysicalCPUs")) {
+                                    $Global:GlobalCPUInfo.Information | Add-Member $Field $Global:GlobalCPUInfo.$Field -Force
+                                }
+                            }
                         }
                     }
                     catch {
@@ -1770,6 +1788,30 @@ function Get-CpuTopology {
     }
 }
 
+function Get-LinuxAllowedCpus {
+    # the cpuset RainbowMiner runs in (LXC, Docker, systemd AllowedCPUs, taskset): the kernel
+    # refuses to schedule the miners on any other CPU, so the topology must not offer them.
+    # Returns a HashSet of CPU numbers, or $null when the list cannot be read
+    if (-not $IsLinux) {return $null}
+    try {
+        $Line = Get-Content "/proc/self/status" -ErrorAction Stop | Where-Object {$_ -match "^Cpus_allowed_list:\s*(\S+)"} | Select-Object -First 1
+        if ($Line -match "^Cpus_allowed_list:\s*(\S+)") {
+            $List = $Matches[1]
+            $Set  = [System.Collections.Generic.HashSet[int]]::new()
+            foreach ($Part in ($List -split ',')) {
+                if ($Part -match '^(\d+)-(\d+)$') {
+                    $Lo = [int]$Matches[1]; $Hi = [int]$Matches[2]
+                    for ($i = $Lo; $i -le $Hi; $i++) {[void]$Set.Add($i)}
+                } elseif ($Part -match '^\d+$') {
+                    [void]$Set.Add([int]$Part)
+                }
+            }
+            if ($Set.Count) {return $Set}
+        }
+    } catch {}
+    $null
+}
+
 #
 # AMD Device functions
 #
@@ -1924,7 +1966,7 @@ param(
             }
         } else {
             if ($IsLinux -and $Runas) {
-                Set-OCDaemon "$NVSMI $ArgumentsString" -OnEmptyAdd $Session.OCDaemonOnEmptyAdd
+                Set-OCDaemon "$NVSMI $ArgumentsString" -OnEmptyAdd $Session.OCDaemonOnEmptyAdd -Check
             } else {
                 Invoke-Exe -FilePath $NVSMI -ArgumentList $ArgumentsString -ExcludeEmptyLines -ExpandLines -Runas:$Runas
             }
@@ -1994,7 +2036,7 @@ function Invoke-NvidiaSettings {
         }
         $Cmd = $Cmd.Trim()
         if ($Cmd) {
-            Set-OCDaemon "nvidia-settings $Cmd" -OnEmptyAdd $Session.OCDaemonOnEmptyAdd
+            Set-OCDaemon "nvidia-settings $Cmd" -OnEmptyAdd $Session.OCDaemonOnEmptyAdd -Check
         }
     } elseif ($IsWindows -and $NvCmd) {
         (Start-Process ".\Includes\NvidiaInspector\nvidiaInspector.exe" -ArgumentList "$($NvCmd -join " ")" -PassThru).WaitForExit(1000) > $null
@@ -2017,16 +2059,101 @@ param(
         Invoke-NvidiaSmi "index","power.default_limit","power.min_limit","power.max_limit","power.limit" -Arguments "-i $($Device -join ',')" | Where-Object {$_.index -match "^\d+$"} | Foreach-Object {
             $index = $Device.IndexOf([int]$_.index)
             if ($index -ge 0) {
-                $PLim = [Math]::Round([double]($_.power_default_limit -replace '[^\d,\.]')*($PowerLimitPercent[[Math]::Min($index,$PowerLimitPercent.Count)]/100),2)
-                $PCur = [Math]::Round([double]($_.power_limit -replace '[^\d,\.]'))
+                $PLim = [Math]::Round([double]($_.power_default_limit -replace '[^\d,\.]')*($PowerLimitPercent[[Math]::Min($index,$PowerLimitPercent.Count-1)]/100),2)
+                $PCur = [double]($_.power_limit -replace '[^\d,\.]')
                 if ($lim = [int]($_.power_min_limit -replace '[^\d,\.]')) {$PLim = [Math]::Max($PLim, $lim)}
                 if ($lim = [int]($_.power_max_limit -replace '[^\d,\.]')) {$PLim = [Math]::Min($PLim, $lim)}
-                if ($PLim -ne $PCur) {
+                if ([Math]::Abs($PLim - $PCur) -ge 0.5) {
                     Invoke-NvidiaSmi -Arguments "-i $($_.index)","-pl $($Plim.ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture))" -Runas > $null
                 }
             }
         }
     } catch {}
+}
+
+function Update-NvidiaOCMap {
+    # nvidia-settings numbers its [gpu:N] targets in X server order, which is not
+    # guaranteed to match RainbowMiner's device order. Ask the X server once for
+    # the PCI address and the perf levels of every GPU; without an X server the
+    # map stays empty and the old index based addressing is used unchanged
+    $Global:NvidiaOCMap = @{}
+    $Global:NvidiaSettingsAvailable = $false
+    if (-not $IsLinux -or -not (Test-OCDaemon)) {return}
+
+    $Cmd = [System.Collections.Generic.List[string]]::new()
+    if ($Session.OCDaemonOnEmptyAdd) {$Session.OCDaemonOnEmptyAdd | Foreach-Object {[void]$Cmd.Add($_)}}
+    [void]$Cmd.Add("nvidia-settings -q PCIBus -q PCIDevice -q GPUPerfModes 2>&1")
+
+    $Out = "$(Invoke-OCDaemon -Cmd $Cmd)"
+    if (-not $Out) {return}
+
+    $Gpus = @{}
+    foreach ($Chunk in ($Out -split "Attribute '")) {
+        if ($Chunk -match "(?s)^(PCIBus|PCIDevice|GPUPerfModes)'\s*\([^\)]*\[gpu:(\d+)\]\):\s*(.*)") {
+            $Attr = $Matches[1]; $Gpu = [int]$Matches[2]; $Value = $Matches[3]
+            if (-not $Gpus.ContainsKey($Gpu)) {$Gpus[$Gpu] = @{}}
+            if ($Attr -eq "GPUPerfModes") {
+                $Perf = [regex]::Matches($Value,"perf=(\d+)") | Foreach-Object {[int]$_.Groups[1].Value} | Measure-Object -Maximum
+                if ($Perf.Count) {$Gpus[$Gpu].Perf = [int]$Perf.Maximum}
+            } elseif ($Value -match "^(\d+)") {
+                $Gpus[$Gpu][$Attr] = [int]$Matches[1]
+            }
+        }
+    }
+
+    $Devices = @($Global:GlobalCachedDevices | Where-Object {$_.Type -eq "Gpu" -and $_.Vendor -eq "NVIDIA"})
+    $Map = @{}
+    foreach ($Gpu in $Gpus.Keys) {
+        if ($Gpus[$Gpu].PCIBus -ne $null -and $Gpus[$Gpu].PCIDevice -ne $null) {
+            $BusId = "{0:X2}:{1:X2}" -f $Gpus[$Gpu].PCIBus,$Gpus[$Gpu].PCIDevice
+            if ($Map.ContainsKey($BusId)) {$Map = $null;break}
+            $Map[$BusId] = [PSCustomObject]@{Index = $Gpu; Perf = $Gpus[$Gpu].Perf}
+        }
+    }
+
+    # use the map only if it is complete and unambiguous, otherwise keep the old behavior
+    if (-not $Map -or -not $Devices.Count -or @($Devices | Where-Object {-not $_.BusId -or -not $Map.ContainsKey("$($_.BusId)".ToUpper())}).Count) {
+        Write-Log -Level Info "nvidia-settings GPU map not available, using RainbowMiner's device order"
+        return
+    }
+
+    $Global:NvidiaSettingsAvailable = $true
+    foreach ($Device in $Devices) {
+        $Entry = $Map["$($Device.BusId)".ToUpper()]
+        $Global:NvidiaOCMap[[int]$Device.Type_Vendor_Index] = [PSCustomObject]@{Index = $Entry.Index; Perf = $Entry.Perf; BusId = "$($Device.BusId)".ToUpper()}
+        if ($Entry.Index -ne [int]$Device.Type_Vendor_Index) {
+            Write-Log -Level Info "nvidia-settings addresses $($Device.Name) (bus $($Device.BusId)) as [gpu:$($Entry.Index)] instead of [gpu:$($Device.Type_Vendor_Index)]"
+        }
+    }
+}
+
+function Get-NvidiaOCTarget {
+[cmdletbinding()]
+param(
+    [Parameter(Mandatory = $True)]
+    [Int]$Index
+)
+    if ($Global:NvidiaOCMap -and $Global:NvidiaOCMap.ContainsKey($Index)) {
+        $Global:NvidiaOCMap[$Index]
+    } elseif ($Device = $Global:GlobalCachedDevices | Where-Object {$_.Type -eq "Gpu" -and $_.Vendor -eq "NVIDIA" -and $_.Type_Vendor_Index -eq $Index} | Select-Object -First 1) {
+        [PSCustomObject]@{Index = $Index; Perf = $null; BusId = if ($Device.BusId) {"$($Device.BusId)".ToUpper()} else {$null}}
+    }
+}
+
+function Get-NvmlOCHelper {
+    $Global:ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(".\IncludesLinux\bash\nvml_oc.py")
+}
+
+function Test-NvmlOC {
+    # LinuxOCMethod: "nvidia-settings" (default, unchanged behavior), "nvml" (always
+    # set core/memory offsets through NVML) or "auto" (NVML only if nvidia-settings
+    # cannot reach an X server). NVML needs root, so it only works with the ocdaemon
+    if (-not $IsLinux) {return $false}
+    $Method = "$($Session.Config.LinuxOCMethod)".ToLower()
+    if ($Method -notin @("nvml","auto")) {return $false}
+    if ($Method -eq "auto" -and $Global:NvidiaSettingsAvailable) {return $false}
+    if (-not (Test-OCDaemon) -or -not (Test-Path (Get-NvmlOCHelper)) -or -not (Get-Command "python3" -ErrorAction Ignore)) {return $false}
+    $true
 }
 
 #

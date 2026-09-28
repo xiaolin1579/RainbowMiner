@@ -185,11 +185,8 @@ class Miner {
                                 } catch {}
                             }
                         } elseif ($Global:IsWindows) {
-                            if (Get-Command "Get-NetTCPConnection" -ErrorAction Ignore) {
-                                (Get-NetTCPConnection -ErrorAction Stop).LocalPort | Sort-Object -Unique
-                            } else {
-                                netstat -anp TCP | Foreach-Object {"$($_)".Trim() -split "\s+" | Select-Object -Index 1} | Where-Object {$_ -match ":(\d+)$"} | Foreach-Object {[int]$Matches[1]} | Sort-Object -Unique
-                            }
+                            # netstat instead of Get-NetTCPConnection: that would autoload the NetTCPIP CDXML module (~8 MB) into the process
+                            netstat -an | Foreach-Object {$l = "$($_)".Trim() -split "\s+"; if ($l[0] -like "TCP*") {$l[1]}} | Where-Object {$_ -match ":(\d+)$"} | Foreach-Object {[int]$Matches[1]} | Sort-Object -Unique
                         }
                     } catch {
                         Write-Log -Level Warn "Auto-Port failed for $($this.Name): $($_.Exception.Message)"
@@ -425,7 +422,9 @@ class Miner {
         if ($gpu -lt -2) {$gpu=-2} elseif ($gpu -gt 3) {$gpu=3}
         $this.Priorities.CPU = $cpu
         $this.Priorities.GPU = $gpu
-        $this.Priorities.CPUAffinity = ConvertFrom-CPUAffinity $affinity -ToInt
+        # the process affinity is an IntPtr: masks beyond 63 bits cannot be applied at process level
+        $aff = ConvertFrom-CPUAffinity $affinity -ToInt
+        $this.Priorities.CPUAffinity = if ($aff -gt [Int64]::MaxValue) {0} else {[Int64]$aff}
     }
 
     SetStaticPort([int]$port=0) {
@@ -834,6 +833,9 @@ class Miner {
 
         $IsAfterburner = Test-Afterburner
 
+        $CanLockClocks = $Global:IsLinux -or (Test-IsElevated)
+        $UseNvml       = $Global:IsLinux -and (Test-NvmlOC)
+
         $DeviceVendor = $Global:GlobalCachedDevices | Where-Object {$this.OCprofile.ContainsKey($_.Model)} | Foreach-Object {$_.Vendor} | Select-Object -Unique
 
         if ($Global:IsWindows) {
@@ -866,7 +868,7 @@ class Miner {
                     "1650"      {4;Break}
                     "1660"      {4;Break}
                     "^RTX"      {4;Break}
-                    default {3}
+                    default {-1}
                 }
                 [System.Collections.Generic.List[int]]$DeviceIds = @()
                 [System.Collections.Generic.List[string]]$CardIds   = @()
@@ -904,7 +906,6 @@ class Miner {
                 if ($this.Profiles.$DeviceModel.Profile.PostCmd) {
                     [void]$RunCmd.Add([PSCustomObject]@{FilePath = $this.Profiles.$DeviceModel.Profile.PostCmd;ArgumentList=$this.Profiles.$DeviceModel.Profile.PostCmdArguments})
                 }
-                $this.OCprofileSet = $null
             } else {
                 $Profile = $this.Profiles.$DeviceModel.Profile
 
@@ -926,27 +927,41 @@ class Miner {
             if ($DeviceVendor -eq "NVIDIA") {
 
                 foreach($DeviceId in $this.Profiles.$DeviceModel.Index) {
+                    $NvTarget = $DeviceId
+                    $NvBusId  = $null
+                    $x = $this.Profiles.$DeviceModel.x
+                    if ($Global:IsLinux) {
+                        if ($NvOCTarget = Get-NvidiaOCTarget -Index $DeviceId) {
+                            $NvTarget = $NvOCTarget.Index
+                            $NvBusId  = $NvOCTarget.BusId
+                            if ($x -lt 0 -and $NvOCTarget.Perf -ne $null) {$x = $NvOCTarget.Perf}
+                        }
+                    }
+                    if ($x -lt 0) {$x = 3}
+                    $GpuNvml = $UseNvml -and $NvBusId
+                    [System.Collections.Generic.List[string]]$NvmlArgs = @()
                     if ($Profile.PowerLimit -gt 0) {$val=[Math]::Max([Math]::Min($Profile.PowerLimit,200),20);if ($Global:IsLinux) {Set-NvidiaPowerLimit $DeviceId $val} else {[void]$NvCmd.Add("-setPowerTarget:$($DeviceId),$($val)")};$applied_any=$true;if ($Config) {$this.SetOCprofileValue($DeviceModel,"PowerLimit",$val)}}
                     if (-not $Global:IsLinux) {
                         if ($Profile.ThermalLimit -gt 0) {$val=[Math]::Max([Math]::Min($Profile.ThermalLimit,95),50);[void]$NvCmd.Add("-setTempTarget:$($DeviceId),$(if (Get-Yes $Profile.PriorizeThermalLimit) {"1"} else {"0"}),$($val)");$applied_any=$true;if ($Config) {$this.SetOCprofileValue($DeviceModel,"ThermalLimit",$val);$this.SetOCprofileValue($DeviceModel,"PriorizeThermalLimit",(Get-Yes $Profile.PriorizeThermalLimit))}}
                         if ($Profile.LockVoltagePoint-match '^\-*[0-9]+$') {$val=[int]([Convert]::ToInt32($Profile.LockVoltagePoint)/12500)*12500;[void]$NvCmd.Add("-lockVoltagePoint:$($DeviceId),$($val)");$applied_any=$true;if ($Config) {$this.SetOCprofileValue($DeviceModel,"LockVoltagePoint",$val)}}
-                    } else {
-                        [void]$NvCmd.Add("-a '[gpu:$($DeviceId)]/GPUPowerMizerMode=1'")
+                    } elseif (-not $GpuNvml) {
+                        [void]$NvCmd.Add("-a '[gpu:$($NvTarget)]/GPUPowerMizerMode=1'")
                     }
-                    if ($Profile.CoreClockBoost -match '^\-*[0-9]+$') {$val=[Convert]::ToInt32($Profile.CoreClockBoost);[void]$NvCmd.Add("$(if ($Global:IsLinux) {
-                        if ($ApplyToAllPerformanceLevels) {"-a '[gpu:$($DeviceId)]/GPUGraphicsClockOffsetAllPerformanceLevels=$($val)'"}
-                        else {"-a '[gpu:$($DeviceId)]/GPUGraphicsClockOffset[$($this.Profiles.$DeviceModel.x)]=$($val)'"}} else {"-setBaseClockOffset:$($DeviceId),0,$($val)"})")
+                    if ($Profile.CoreClockBoost -match '^\-*[0-9]+$') {$val=[Convert]::ToInt32($Profile.CoreClockBoost);if ($GpuNvml) {[void]$NvmlArgs.Add("--core $($val)")} else {[void]$NvCmd.Add("$(if ($Global:IsLinux) {
+                        if ($ApplyToAllPerformanceLevels) {"-a '[gpu:$($NvTarget)]/GPUGraphicsClockOffsetAllPerformanceLevels=$($val)'"}
+                        else {"-a '[gpu:$($NvTarget)]/GPUGraphicsClockOffset[$($x)]=$($val)'"}} else {"-setBaseClockOffset:$($DeviceId),0,$($val)"})")}
                         $applied_any=$true
                         if ($Config) {$this.SetOCprofileValue($DeviceModel,"CoreClockBoost",$val)}
                     }
-                    if ($Profile.MemoryClockBoost -match '^\-*[0-9]+$') {$val = [Convert]::ToInt32($Profile.MemoryClockBoost);[void]$NvCmd.Add("$(if ($Global:IsLinux) {
-                        if ($ApplyToAllPerformanceLevels) {"-a '[gpu:$($DeviceId)]/GPUMemoryTransferRateOffsetAllPerformanceLevels=$($val)'"}
-                        else{"-a '[gpu:$($DeviceId)]/GPUMemoryTransferRateOffset[$($this.Profiles.$DeviceModel.x)]=$($val)'"}} else {"-setMemoryClockOffset:$($DeviceId),0,$($val)"})")
+                    if ($Profile.MemoryClockBoost -match '^\-*[0-9]+$') {$val = [Convert]::ToInt32($Profile.MemoryClockBoost);if ($Global:IsLinux -and "$($Profile.MemoryClockScale)" -eq "windows") {$val *= 2};if ($GpuNvml) {[void]$NvmlArgs.Add("--mem $($val)")} else {[void]$NvCmd.Add("$(if ($Global:IsLinux) {
+                        if ($ApplyToAllPerformanceLevels) {"-a '[gpu:$($NvTarget)]/GPUMemoryTransferRateOffsetAllPerformanceLevels=$($val)'"}
+                        else{"-a '[gpu:$($NvTarget)]/GPUMemoryTransferRateOffset[$($x)]=$($val)'"}} else {"-setMemoryClockOffset:$($DeviceId),0,$($val)"})")}
                         $applied_any=$true
                         if ($Config) {$this.SetOCprofileValue($DeviceModel,"MemoryClockBoost",$val)}
                     }
-                    if ($Profile.LockCoreClock -match '^[0-9]+$') {[void]$NvSmiCmd.Add("-i $($DeviceId) $(if ($Profile.LockCoreClock -eq 0) {"-rgc"} else {"-lgc $($Profile.LockCoreClock)"})");if ($Config) {$this.SetOCprofileValue($DeviceModel,"LockCoreClock",$Profile.LockCoreClock)}}
-                    if ($Profile.LockMemoryClock -match '^[0-9]+$') {[void]$NvSmiCmd.Add("-i $($DeviceId) $(if ($Profile.LockMemoryClock -eq 0) {"-rmc"} else {"-lmc $($Profile.LockMemoryClock)"})");if ($Config) {$this.SetOCprofileValue($DeviceModel,"LockMemoryClock",$Profile.LockMemoryClock)}}
+                    if ($Profile.LockCoreClock -match '^[0-9]+$') {if ($CanLockClocks) {$applied_any=$true};[void]$NvSmiCmd.Add("-i $($DeviceId) $(if ($Profile.LockCoreClock -eq 0) {"-rgc"} else {"-lgc $($Profile.LockCoreClock)"})");if ($Config) {$this.SetOCprofileValue($DeviceModel,"LockCoreClock",$Profile.LockCoreClock)}}
+                    if ($Profile.LockMemoryClock -match '^[0-9]+$') {if ($CanLockClocks) {$applied_any=$true};[void]$NvSmiCmd.Add("-i $($DeviceId) $(if ($Profile.LockMemoryClock -eq 0) {"-rmc"} else {"-lmc $($Profile.LockMemoryClock)"})");if ($Config) {$this.SetOCprofileValue($DeviceModel,"LockMemoryClock",$Profile.LockMemoryClock)}}
+                    if ($NvmlArgs.Count) {Set-OCDaemon "python3 `"$(Get-NvmlOCHelper)`" set --bus $($NvBusId) $($NvmlArgs -join ' ')" -OnEmptyAdd $Global:Session.OCDaemonOnEmptyAdd -Check}
                 }
 
             } elseif ($DeviceVendor -eq "AMD" -and $Global:IsLinux) {
@@ -971,7 +986,7 @@ class Miner {
                     }
                 }
             }
-            if ($applied_any) {[void]$applied.Add("OC set for $($this.BaseName)-$($DeviceModel)-$($this.BaseAlgorithm -join '-'): PL=$(if ($Profile.PowerLimit) {"$($Profile.PowerLimit)%"} else {"-"}), TL=$(if ($Profile.ThermalLimit) {"$($Profile.ThermalLimit)°C"} else {"-"}), PRIO=$(if (Get-Yes $Profile.PriorizeThermalLimit) {"TL"} else {"PL"}), MEMboost=$(if ($Profile.MemoryClockBoost -ne '') {"$($Profile.MemoryClockBoost)"} else {"-"}), COREboost=$(if ($Profile.CoreClockBoost -ne '') {"$($Profile.CoreClockBoost)"} else {"-"}), MEMlock=$(if ($Profile.LockMemoryClock -ne '') {"$($Profile.LockMemoryClock)"} else {"-"}), CORElock=$(if ($Profile.LockCoreClock -ne '') {"$($Profile.LockCoreClock)"} else {"-"}), LVP=$(if ($Profile.LockVoltagePoint -ne '') {"$($Profile.LockVoltagePoint)µV"} else {"-"})")}
+            if ($applied_any) {[void]$applied.Add("OC set for $($this.BaseName)-$($DeviceModel)-$($this.BaseAlgorithm -join '-'): PL=$(if ($Profile.PowerLimit) {"$($Profile.PowerLimit)%"} else {"-"}), TL=$(if ($Profile.ThermalLimit) {"$($Profile.ThermalLimit)°C"} else {"-"}), PRIO=$(if (Get-Yes $Profile.PriorizeThermalLimit) {"TL"} else {"PL"}), MEMboost=$(if ($Profile.MemoryClockBoost -ne '') {"$($Profile.MemoryClockBoost)$(if ($Global:IsLinux -and "$($Profile.MemoryClockScale)" -eq "windows") {"(x2)"})"} else {"-"}), COREboost=$(if ($Profile.CoreClockBoost -ne '') {"$($Profile.CoreClockBoost)"} else {"-"}), MEMlock=$(if ($Profile.LockMemoryClock -ne '') {"$($Profile.LockMemoryClock)"} else {"-"}), CORElock=$(if ($Profile.LockCoreClock -ne '') {"$($Profile.LockCoreClock)"} else {"-"}), LVP=$(if ($Profile.LockVoltagePoint -ne '') {"$($Profile.LockVoltagePoint)µV"} else {"-"})")}
         }
 
         if ($RunCmd.Count) {
@@ -1009,7 +1024,7 @@ class Miner {
                 } elseif ($IsAfterburner) {
                     $Script:abControl.CommitChanges()
                 }
-                $applied | Foreach-Object {Write-Log -Level Info $_}
+                $applied | Foreach-Object {Write-Log -Level Info $(if ($Global:IsLinux) {$_ -replace '^OC set','OC queued'} else {$_})}
                 if ($Sleep -gt 0) {Start-Sleep -Milliseconds $Sleep}
             } catch {
                 Write-Log -Level Warn "Failed to apply OC for $($this.Name))!"
@@ -3930,6 +3945,11 @@ class Xmrig3 : Miner {
 
             $Config = Get-Content $ConfigFile -Raw -ErrorAction Ignore | ConvertFrom-Json -ErrorAction Ignore
 
+            if ($Config.$Device -and $ThreadsConfig.$Algo -is [string] -and ($Config.$Device.$Algo | Measure-Object).Count -eq 1) {
+                # written while the alias string was mistaken for the thread list (one thread on CPU 0): rebuild it
+                $Config = $null
+            }
+
             if (-not $Config.$Device -and -not ($Config.$Device.$Algo | Measure-Object).Count -and -not ($Config.$Device.$Algo0 | Measure-Object).Count) {
                 if ($ThreadsConfig.$Algo -or $ThreadsConfig.$Algo0) {
                     $Parameters.Config | Add-Member $Device ([PSCustomObject]@{}) -Force
@@ -3937,20 +3957,33 @@ class Xmrig3 : Miner {
                         $n = $_.Name; $v = $_.Value
                         $Parameters.Config.$Device | Add-Member $n $v -Force
                     }
+                    # xmrig stores profile aliases as strings ("rx/arq": "rx/wow"): follow them to the real
+                    # thread list, or RandomArq and friends end up with a single thread on CPU 0
+                    $AlgoSource = $Algo
+                    $AlgoHops   = 0
+                    while ($ThreadsConfig.$AlgoSource -is [string] -and $AlgoHops -lt 3) {$AlgoSource = $ThreadsConfig.$AlgoSource;$AlgoHops++}
+                    if ($ThreadsConfig.$AlgoSource -is [string] -or $ThreadsConfig.$AlgoSource -is [bool] -or -not ($ThreadsConfig.$AlgoSource | Measure-Object).Count) {$AlgoSource = $Algo0}
                     $Algo = if ($ThreadsConfig.$Algo) {$Algo} else {$Algo0}
 
                     if ($Device -eq "cpu") {
+                        # pick CPUs in topology order (one thread per physical core first): the former
+                        # even-first sort assumed Windows sibling numbering and paired siblings on Linux
+                        $CpuRank = @{}
+                        foreach ($CpuNo in @(@($Global:GlobalCPUInfo.RealCores) + @($Global:GlobalCPUInfo.ThreadList))) {
+                            if ($CpuNo -ne $null -and -not $CpuRank.ContainsKey([int]$CpuNo)) {$CpuRank[[int]$CpuNo] = $CpuRank.Count}
+                        }
+                        $CpuSort = {if ($CpuRank.ContainsKey([int]$_)) {$CpuRank[[int]$_]} else {1000000 + [int]$_}}
                         $cix = @{}
-                        $ThreadsAffinity = $ThreadsConfig.$Algo | Foreach-Object {if ($_ -is [array] -and $_.Count -eq 2) {$cix["k$($_[1])"] = $_[0];$_[1]} else {$_}}
+                        $ThreadsAffinity = $ThreadsConfig.$AlgoSource | Foreach-Object {if ($_ -is [array] -and $_.Count -eq 2) {$cix["k$($_[1])"] = $_[0];$_[1]} else {$_}}
 
-                        $Parameters.Config.$Device | Add-Member $Algo ([Array]($ThreadsAffinity | Sort-Object {$_ -band 1},{$_} | Select-Object -First $(if ($Parameters.Threads -and $Parameters.Threads -lt $ThreadsConfig.$Algo.Count) {$Parameters.Threads} else {$ThreadsConfig.$Algo.Count}) | Sort-Object)) -Force
+                        $Parameters.Config.$Device | Add-Member $Algo ([Array]($ThreadsAffinity | Sort-Object $CpuSort | Select-Object -First $(if ($Parameters.Threads -and $Parameters.Threads -lt $ThreadsConfig.$AlgoSource.Count) {$Parameters.Threads} else {$ThreadsConfig.$AlgoSource.Count}) | Sort-Object)) -Force
 
                         $Aff = if ($Parameters.Affinity) {ConvertFrom-CPUAffinity $Parameters.Affinity}
                         if ($AffCount = ($Aff | Measure-Object).Count) {
                             $AffThreads = [System.Collections.ArrayList]::new(@(Compare-Object $Aff $Parameters.Config.$Device.$Algo -IncludeEqual -ExcludeDifferent | Where-Object {$_.SideIndicator -eq "=="} | Foreach-Object {$_.InputObject} | Select-Object))
                             $ThreadsCount = [Math]::Min($AffCount,$Parameters.Config.$Device.$Algo.Count)
                             if ($AffThreads.Count -lt $ThreadsCount) {
-                                $Aff | Where-Object {$_ -notin $AffThreads} | Sort-Object {$_ -band 1},{$_} | Select-Object -First ($ThreadsCount-$AffThreads.Count) | Foreach-Object {[void]$AffThreads.Add($_)}
+                                $Aff | Where-Object {$_ -notin $AffThreads} | Sort-Object $CpuSort | Select-Object -First ($ThreadsCount-$AffThreads.Count) | Foreach-Object {[void]$AffThreads.Add($_)}
                             }
                             $Parameters.Config.$Device.$Algo = @($AffThreads | Sort-Object);
                         }
@@ -3961,7 +3994,7 @@ class Xmrig3 : Miner {
                             }
                         }
                     } else { #device is cuda or opencl
-                        $Parameters.Config.$Device | Add-Member $Algo ([Array](@($ThreadsConfig.$Algo | Where-Object {$Parameters.Devices -contains $_.index} | Select-Object) * $Parameters.Threads)) -Force
+                        $Parameters.Config.$Device | Add-Member $Algo ([Array](@($ThreadsConfig.$AlgoSource | Where-Object {$Parameters.Devices -contains $_.index} | Select-Object) * $Parameters.Threads)) -Force
                     }
                     $Parameters.Config | Add-Member autosave $false -Force
                     $Parameters.Config | ConvertTo-Json -Depth 10 | Set-Content $ConfigFile -Force
@@ -4084,6 +4117,11 @@ class Xmrig6 : Miner {
 
             $Config = Get-Content $ConfigFile -Raw -ErrorAction Ignore | ConvertFrom-Json -ErrorAction Ignore
 
+            if ($Config.$Device -and $ThreadsConfig.$Algo -is [string] -and ($Config.$Device.$Algo | Measure-Object).Count -eq 1) {
+                # written while the alias string was mistaken for the thread list (one thread on CPU 0): rebuild it
+                $Config = $null
+            }
+
             if (-not $Config.$Device -and -not ($Config.$Device.$Algo | Measure-Object).Count -and -not ($Config.$Device.$Algo0 | Measure-Object).Count) {
                 if ($ThreadsConfig.$Algo -or $ThreadsConfig.$Algo0) {
                     $Parameters.Config | Add-Member $Device ([PSCustomObject]@{}) -Force
@@ -4091,23 +4129,36 @@ class Xmrig6 : Miner {
                         $n = $_.Name; $v = $_.Value
                         $Parameters.Config.$Device | Add-Member $n $v -Force
                     }
+                    # xmrig stores profile aliases as strings ("rx/arq": "rx/wow"): follow them to the real
+                    # thread list, or RandomArq and friends end up with a single thread on CPU 0
+                    $AlgoSource = $Algo
+                    $AlgoHops   = 0
+                    while ($ThreadsConfig.$AlgoSource -is [string] -and $AlgoHops -lt 3) {$AlgoSource = $ThreadsConfig.$AlgoSource;$AlgoHops++}
+                    if ($ThreadsConfig.$AlgoSource -is [string] -or $ThreadsConfig.$AlgoSource -is [bool] -or -not ($ThreadsConfig.$AlgoSource | Measure-Object).Count) {$AlgoSource = $Algo0}
                     $Algo = if ($ThreadsConfig.$Algo) {$Algo} else {$Algo0}
 
                     if ($Device -eq "cpu") {
                         if ($Algo -eq "ghostrider") {
                             $Parameters.Config.$Device | Add-Member "max-threads-hint" ([int](100 * $Parameters.Threads / $Global:GlobalCPUInfo.Threads)) -Force
                         }
+                        # pick CPUs in topology order (one thread per physical core first): the former
+                        # even-first sort assumed Windows sibling numbering and paired siblings on Linux
+                        $CpuRank = @{}
+                        foreach ($CpuNo in @(@($Global:GlobalCPUInfo.RealCores) + @($Global:GlobalCPUInfo.ThreadList))) {
+                            if ($CpuNo -ne $null -and -not $CpuRank.ContainsKey([int]$CpuNo)) {$CpuRank[[int]$CpuNo] = $CpuRank.Count}
+                        }
+                        $CpuSort = {if ($CpuRank.ContainsKey([int]$_)) {$CpuRank[[int]$_]} else {1000000 + [int]$_}}
                         $cix = @{}
-                        $ThreadsAffinity = $ThreadsConfig.$Algo | Foreach-Object {if ($_ -is [array] -and $_.Count -eq 2) {$cix["k$($_[1])"] = $_[0];$_[1]} else {$_}}
+                        $ThreadsAffinity = $ThreadsConfig.$AlgoSource | Foreach-Object {if ($_ -is [array] -and $_.Count -eq 2) {$cix["k$($_[1])"] = $_[0];$_[1]} else {$_}}
 
-                        $Parameters.Config.$Device | Add-Member $Algo ([Array]($ThreadsAffinity | Sort-Object {$_ -band 1},{$_} | Select-Object -First $(if ($Parameters.Threads -and $Parameters.Threads -lt $ThreadsConfig.$Algo.Count) {$Parameters.Threads} else {$ThreadsConfig.$Algo.Count}) | Sort-Object)) -Force
+                        $Parameters.Config.$Device | Add-Member $Algo ([Array]($ThreadsAffinity | Sort-Object $CpuSort | Select-Object -First $(if ($Parameters.Threads -and $Parameters.Threads -lt $ThreadsConfig.$AlgoSource.Count) {$Parameters.Threads} else {$ThreadsConfig.$AlgoSource.Count}) | Sort-Object)) -Force
 
                         $Aff = if ($Parameters.Affinity) {ConvertFrom-CPUAffinity $Parameters.Affinity}
                         if ($AffCount = ($Aff | Measure-Object).Count) {
                             $AffThreads = [System.Collections.ArrayList]::new(@(Compare-Object $Aff $Parameters.Config.$Device.$Algo -IncludeEqual -ExcludeDifferent | Where-Object {$_.SideIndicator -eq "=="} | Foreach-Object {$_.InputObject} | Select-Object))
                             $ThreadsCount = [Math]::Min($AffCount,$Parameters.Config.$Device.$Algo.Count)
                             if ($AffThreads.Count -lt $ThreadsCount) {
-                                $Aff | Where-Object {$_ -notin $AffThreads} | Sort-Object {$_ -band 1},{$_} | Select-Object -First ($ThreadsCount-$AffThreads.Count) | Foreach-Object {[void]$AffThreads.Add($_)}
+                                $Aff | Where-Object {$_ -notin $AffThreads} | Sort-Object $CpuSort | Select-Object -First ($ThreadsCount-$AffThreads.Count) | Foreach-Object {[void]$AffThreads.Add($_)}
                             }
                             $Parameters.Config.$Device.$Algo = @($AffThreads | Sort-Object);
                         }
@@ -4120,7 +4171,7 @@ class Xmrig6 : Miner {
                         $Parameters.Config | Add-Member cuda   ([PSCustomObject]@{enabled=$false}) -Force
                         $Parameters.Config | Add-Member opencl ([PSCustomObject]@{enabled=$false}) -Force
                     } else { #device is cuda or opencl
-                        $Parameters.Config.$Device | Add-Member $Algo ([Array](@($ThreadsConfig.$Algo | Where-Object {$Parameters.Devices -contains $_.index} | Select-Object) * $Parameters.Threads)) -Force
+                        $Parameters.Config.$Device | Add-Member $Algo ([Array](@($ThreadsConfig.$AlgoSource | Where-Object {$Parameters.Devices -contains $_.index} | Select-Object) * $Parameters.Threads)) -Force
                         $Parameters.Config | Add-Member cpu ([PSCustomObject]@{enabled=$false}) -Force
                         $Parameters.Config | Add-Member "$(if ($Device -eq "cuda") {"opencl"} else {"cuda"})" ([PSCustomObject]@{enabled=$false}) -Force
                     }

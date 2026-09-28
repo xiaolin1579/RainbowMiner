@@ -15,8 +15,11 @@ Contents
 2. [Option 1: MSI Afterburner profiles](#option-1-msi-afterburner-profiles)
 3. [Option 2: custom overclocking profiles](#option-2-custom-overclocking-profiles)
 4. [Config\ocprofiles.config.txt](#configocprofilesconfigtxt)
-5. [The Nvidia P2 state](#the-nvidia-p2-state)
-6. [Overclocking does not work on Linux](#overclocking-does-not-work-on-linux)
+5. [The default profiles](#the-default-profiles)
+6. [Memory offsets on Linux](#memory-offsets-on-linux)
+7. [Recommended clock locks](#recommended-clock-locks)
+8. [The Nvidia P2 state](#the-nvidia-p2-state)
+9. [Overclocking does not work on Linux](#overclocking-does-not-work-on-linux)
 
 ## Which of the two options do I want?
 
@@ -63,7 +66,7 @@ The differences:
 > I set the ocprofile to a clock and then set it different within AF under the same profile number
 
 - MSI Afterburner profiles are fixed to a maximum of five and are selected by their number 1 to 5 in parameter "MSIAprofile" in miners.config.txt
-- ocprofiles are unlimited in amount, you decide what their names are. RainbowMiner comes with an example ocprofiles.config.txt, where the profiles are named "Profile1", "Profile", .. "Profile9". The profile is being selected by the full name in parameter "OCprofile" in miners.config.txt (for example "Profile2")
+- ocprofiles are unlimited in amount, you decide what their names are. RainbowMiner comes with preset profiles named "Profile0" to "Profile8" (see [The default profiles](#the-default-profiles)). The profile is being selected by the full name in parameter "OCprofile" in miners.config.txt (for example "Profile2")
 
 > My overclocking settings do not work on Linux
 
@@ -231,6 +234,7 @@ Example (this is the setup for one of my GTX1070 rigs, basically substituting th
 - PowerLimit: in percent, set to 0, if you do not want this to be changed
 - ThermalLimit: in °C, set to 0, if you do not want this to be changed
 - MemoryClockBoost: in MHz, set to "*", if you do not want this to be changed
+- MemoryClockScale: "windows" if MemoryClockBoost is an MSI Afterburner number (Linux doubles it), "linux" if it is a nvidia-settings/HiveOS number (see [Memory offsets on Linux](#memory-offsets-on-linux))
 - CoreClockBoost: in MHz, set to "*", if you do not want this to be changed
 - LockVoltagePoint: in µV, set to "*", if you do not want this to be changed or "0", if voltagePoint should be unlocked
 - LockMemoryClock: in MHz, set to "*", if you do not want this to be changed or "0", if MemoryClock should be unlocked
@@ -253,6 +257,118 @@ The suffix decides how narrowly a profile is aimed, and the more specific one al
 So a rig with six GTX1060, of which two only take a low memory overclock, needs one
 `Profile2-GTX1060` for the four good ones plus a `Profile2-GPU#04` and `Profile2-GPU#05` for
 the other two.
+
+## The default profiles
+
+RainbowMiner seeds `Profile0` to `Profile8` for every GPU model it finds in your rig. For the
+Nvidia models listed below, the values come from a preset table; every other model gets empty
+profiles that change nothing. The presets are written once: RainbowMiner never overwrites a
+profile that is already in your `ocprofiles.config.txt`, so editing them is safe.
+
+| Profile  | Idea                                   | Used by (algorithms.config.txt)                                          |
+| -------- | -------------------------------------- | ------------------------------------------------------------------------ |
+| Profile0 | core up, memory +0                     | Cuckatoo31/32, Cuckaroo29/30                                             |
+| Profile1 | stock, nothing is changed              | Allium, Qubit                                                            |
+| Profile2 | core up, memory max                    | Autolykos2, NexaPow, XelisHashV2/V3, BeamHash3, MTP - and the default for every algorithm without an entry |
+| Profile3 | core up, half memory                   | Equihash family, NeoScrypt                                               |
+| Profile4 | core up, memory as low as it goes      | kHeavyHash, Karlsen v1, Pyrin, Blake3, SHA512256d, SHA3x, SHA256dt, Hoohash, Qhash, Quantus, DynexSolve, X16r family, Lyra2z |
+| Profile5 | core up, memory reduced (85%)          | a few miner-specific entries in miners.config.txt                         |
+| Profile6 | core down, memory max, low power       | Ethash, EtcHash, EthashB3, UbqHash, FishHash, KarlsenHashV2, Octopus     |
+| Profile7 | core slightly up, memory max           | nothing by default, kept as a template for a small core offset on the ProgPow family |
+| Profile8 | core +0, memory max                    | KawPow family, MeowPow, EvrProgPow, SCCPow, PhiHash, FiroPow, ProgPowZ and the other ProgPow variants |
+
+Since v5.0.3.2 the whole ProgPow family, KawPow included, runs on Profile8: the small core
+offset of Profile7 made Gminer's KawPow kernel crash on a GTX1070 rig, for a gain of one or
+two percent at best. That update moves these algorithms from Profile7 to Profile8 in your
+`algorithms.config.txt`, unless one of your Profile7 profiles was edited by hand - then
+nothing is touched and you decide. PhiHash had no entry before and ran on the device
+default; an empty PhiHash entry gets Profile8 at the update as well.
+
+Presets exist for GTX1050Ti, GTX1060 (3GB/6GB), GTX1070, GTX1070Ti, GTX1080, GTX1080Ti,
+P104-100, P106-100, GTX1650 (Super), GTX1660 (Super/Ti), RTX2060 to RTX2080Ti (incl. Super),
+the whole RTX30, RTX40 and RTX50 series. They are conservative values that should run on any
+card of that model, not the maximum your card may reach. All presets are in MSI Afterburner scale
+and carry `"MemoryClockScale": "windows"`, so they give the same overclock on Windows and on
+Linux. Things to know:
+
+- **GTX1070, RTX3070** are tested by the RainbowMiner author; all others are taken from public
+  mining benchmarks (hashrate.no, Kryptex) and should be checked on your own rig.
+- **GDDR5X (GTX1080, GTX1080Ti, P104-100):** if you use the ETHlargement Pill or a miner's
+  memory timing tweak, the usable memory offset goes down.
+- **GTX1660 Super with Hynix memory** does not take positive memory offsets well, that's why its
+  preset is low. Samsung and Micron cards can take +750.
+- **GDDR6X (RTX3070Ti, RTX3080/Ti, RTX3090/Ti):** watch the memory junction temperature, it
+  throttles at 110 C. The RTX3090 back-side memory is the first to get there.
+- **4 GB cards** (GTX1050Ti, GTX1650) are too small for most current DAG coins, so Profile6 to
+  Profile8 only matter for them on small-DAG coins.
+
+## Memory offsets on Linux
+
+All presets and all values in this document use the Windows scale, the one that MSI
+Afterburner and nvidiaInspector show. On Linux, RainbowMiner hands MemoryClockBoost to
+nvidia-settings as `GPUMemoryTransferRateOffset`, which is an offset on the memory **transfer
+rate**. GDDR memory transfers data twice per clock, so the transfer rate is exactly twice the
+clock, and **the same number gives only half the memory overclock on Linux**.
+
+This does not depend on the Linux distribution, the GPU generation or the memory type
+(GDDR5, GDDR5X, GDDR6, GDDR6X, GDDR7) - it is the unit of the Linux control. HiveOS says the
+same: "Usually this value is double from what you see in AfterBurner" (+800 on Windows = 1600
+on HiveOS). Values from hashrate.no, HiveOS, lolMiner `--moff` or BzMiner are already in the
+Linux scale; Rigel `--mclock` uses the Windows scale.
+
+Every profile therefore says which scale its MemoryClockBoost is in, with the field
+`MemoryClockScale`:
+
+| MemoryClockScale | MemoryClockBoost is        | On Linux RainbowMiner sends | On Windows |
+| ---------------- | -------------------------- | --------------------------- | ---------- |
+| `windows`        | an Afterburner number      | the number times two        | the number |
+| `linux`          | a nvidia-settings number   | the number as it is         | the number |
+| empty            | whatever it was so far     | the number as it is         | the number |
+
+- The presets ship as `windows`, so `"MemoryClockBoost": "800"` is +800 in Afterburner terms on
+  both systems (Linux gets 1600 as transfer rate offset).
+- Profiles from before this field existed get it added empty, which means "as it is" on every
+  platform: nothing changes for them, on no rig and in no server/client combination, until you
+  set the scale yourself. The same goes for profiles from an older setup.json or an older
+  server. If you seeded the presets on a Linux rig before the field existed, delete the
+  `ProfileN-<Model>` entries you have not edited; RainbowMiner seeds them again with `windows`.
+- Numbers from hashrate.no, HiveOS, lolMiner or BzMiner go into a `linux` profile as they are.
+  Numbers from the RainbowMiner docs, MSI Afterburner or Rigel go into a `windows` profile.
+- The field travels with the profile: server config, setup.json and copied files carry it.
+- The log shows what was sent: `MEMboost=800(x2)` means 1600 went to the driver.
+- Windows never scales. On a mixed farm, keep the server's profiles in the scale of the clients
+  that use them, or give each model its own profile with the right scale.
+
+Nothing else is affected: CoreClockBoost, PowerLimit and the absolute locks
+LockCoreClock/LockMemoryClock take the same numbers on both systems.
+
+## Recommended clock locks
+
+Since Turing, most miners lock the core clock instead of using an offset: a locked core plus a
+positive CoreClockBoost runs the card at a lower voltage (an undervolt), and memory locked at
+810 MHz, its lowest state, saves a lot of power on algorithms that do not need memory speed.
+The presets do not use locks, because they have side effects:
+
+- on Windows, RainbowMiner can only set locks when it runs as administrator
+- a lock stays in place until something unlocks it. `"*"` leaves a lock untouched, so once one
+  profile of a card sets a lock, **all other profiles of that card must set LockCoreClock and
+  LockMemoryClock to "0"** - otherwise the next algorithm runs with the old lock
+- Pascal (GTX10xx, P10x) does not support locks on most drivers
+
+If you want them, these are good starting points (LockCoreClock / LockMemoryClock in MHz,
+"-" means leave it "*" and use the offset preset):
+
+| Profile                  | Turing      | Ampere GDDR6 | Ampere GDDR6X | Ada         | Blackwell   |
+| ------------------------ | ----------- | ------------ | ------------- | ----------- | ----------- |
+| Profile2 (Autolykos2)    | 1200 / -    | 1410 / -     | 1410 / -      | 2100 / -    | 1800 / -    |
+| Profile3 (Equihash)      | 1500 / -    | 1600 / -     | 1600 / -      | 2400 / -    | 2400 / -    |
+| Profile4 (core-heavy)    | 1500 / 810  | 1400 / 810   | 1450 / 810    | 2200 / 810  | 2000 / 810  |
+| Profile6 (Ethash family) | 1100 / -    | 1410 / -     | 1100 / -      | 2000 / -    | 2400 / -    |
+| Profile8 (KawPow/ProgPow)| -           | -            | 1200 / -      | 2200 / -    | 2400 / -    |
+
+- For more efficiency on Ampere, use 1305 instead of 1400 for Profile4.
+- NexaPow uses Profile2, but prefers memory locked at 5000 instead of an offset.
+- Autolykos2 with memory locked at 5000 loses about 13% hashrate for about 20% less power.
 
 ## The Nvidia P2 state
 
@@ -283,16 +399,51 @@ them back a little rather than hunting for a P0 switch that does not exist on Li
 
 ## Overclocking does not work on Linux
 
-If the power limit and the thermal limit are applied but the memory and core clocks are not,
-the cause is almost always the access to the X server:
+On Linux, RainbowMiner sets the power limit and the clock locks with `nvidia-smi`, and the
+core/memory offsets with `nvidia-settings`. ThermalLimit and LockVoltagePoint are not applied
+on Linux. All commands run through the ocdaemon as root, and every command that fails is
+reported in the log as a warning, for example:
+
+    OC GTX1070-...: RBM_OC_FAIL rc=1 nvidia-settings -a [gpu:0]/GPUGraphicsClockOffset[3]=100
+    OC GTX1070-...: ERROR: Unable to init server: Could not connect: Connection refused
+
+If the power limit applies but the memory and core clocks do not, the cause is almost always
+the access to the X server, because nvidia-settings needs one:
 
 - `"EnableOCProfiles": "1"` must be set
-- on a rig without a monitor, `"EnableLinuxHeadless": "1"` must be set as well
 - `ocdaemon status` in a shell must report `Running` - if it does not, run `./install.sh`
   again
-- the XAUTHORITY path must match your system. `IncludesLinux/bash/getxauth.sh` guesses it;
-  if the guess is wrong, find the real one with `ps aux | grep Xorg` and put it into
-  `"LinuxXAuthority"` in config.txt
+- on a rig without a monitor, `"EnableLinuxHeadless": "1"` must be set as well. With a
+  monitor, RainbowMiner passes DISPLAY and XAUTHORITY to the ocdaemon only where they are
+  missing
+- `"LinuxDisplay"` is the X display, normally `":0"` (a bare `"0"` is corrected with a
+  warning)
+- `"LinuxXAuthority"` must point to the cookie file of the running X server. If it is empty,
+  RainbowMiner looks for it, including the `-auth` file of a running Xorg (the gdm login
+  screen case). To check by hand: `ps aux | grep Xorg`
+- on a rig without any X server (Ubuntu Server, no Xorg installed), nvidia-settings cannot
+  work at all. Use NVML instead, see below
+
+**nvidia-settings GPU numbers.** The X server numbers its GPUs in its own order, which does
+not have to match RainbowMiner's. At start, RainbowMiner asks the X server for the PCI address
+and the performance levels of every GPU and addresses each card by its PCI bus. If the X
+server cannot be asked, the old numbering is used. The log line "nvidia-settings addresses
+GPU#01 (bus 03:00) as [gpu:0] ..." shows where the orders differ.
+
+**LinuxOCMethod.** Without an X server, the offsets can be set through NVML, the driver
+library that nvidia-smi uses as well. It needs python3 and the running ocdaemon. `install.sh`
+installs python3 (Arch: `pacman -S python`); without it RainbowMiner logs a warning and keeps
+using nvidia-settings:
+
+| LinuxOCMethod     | Core/memory offsets are set by                                      |
+| ----------------- | ------------------------------------------------------------------- |
+| `nvidia-settings` | nvidia-settings (default, unchanged behavior)                        |
+| `auto`            | nvidia-settings, and NVML only if no X server can be reached        |
+| `nvml`            | NVML always                                                         |
+
+NVML is new in RainbowMiner: check the result with `nvidia-smi -q -d CLOCK` and
+`python3 IncludesLinux/bash/nvml_oc.py query` when you switch it on. The memory offset is
+passed to NVML with the same number as to nvidia-settings.
 
 One trap on a client rig: `EnableLinuxHeadless` is an ordinary config value, so a server
 config can overwrite it. If overclocking stops working right after a config sync, check

@@ -13,13 +13,13 @@ if (-not $Global:DeviceCache.DevicesByTypes.NVIDIA -and -not $InfoOnly) {return}
 $Port = "367{0:d2}"
 $ManualURI = "https://github.com/firoorg/firominer/releases"
 $DevFee = 0.0
-$Version = "1.5.0"
+$Version = "1.5.1"
 
 if ($IsLinux) {
     $UriCuda = @(
         [PSCustomObject]@{
             Path = ".\Bin\NVIDIA-FiroPOW\bin\firominer"
-            Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v1.5.0-firominer/firominer-linux-x86_64-cuda12.9-opencl-1.5.0.tar.gz"
+            Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v1.5.1-firominer/firominer-linux-x86_64-cuda12.9-opencl-1.5.1.tar.gz"
             Cuda = "12.9"
         }
     )
@@ -27,7 +27,7 @@ if ($IsLinux) {
     $UriCuda = @(
         [PSCustomObject]@{
             Path = ".\Bin\NVIDIA-FiroPOW\bin\firominer.exe"
-            Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v1.5.0-firominer/firominer-windows-x86_64-cuda12.9-opencl-1.5.0.zip"
+            Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v1.5.1-firominer/firominer-windows-x86_64-cuda12.9-opencl-1.5.1.zip"
             Cuda = "12.9"
         }
     )
@@ -102,7 +102,7 @@ $Global:DeviceCache.DevicesByTypes.NVIDIA | Select-Object Vendor, Model -Unique 
 					DeviceName     = $Miner_Device.Name
 					DeviceModel    = $Miner_Model
 					Path           = $Path
-					Arguments      = "--api-port -`$mport -P $($Miner_Protocol)://$(Get-UrlEncode $Pools.$Algorithm_Norm.User)$(if ($Pools.$Algorithm_Norm.Pass) {":$(Get-UrlEncode $Pools.$Algorithm_Norm.Pass)"})@$($Pools.$Algorithm_Norm.Host):$($Pools.$Algorithm_Norm.Port) --cuda --cuda-devices $($DeviceIDsAll) $($_.Params)"
+					Arguments      = "--api-port -`$mport -P $($Miner_Protocol)://$(Get-UrlEncode $Pools.$Algorithm_Norm.User)$(if ($Pools.$Algorithm_Norm.Pass) {":$(Get-UrlEncode $Pools.$Algorithm_Norm.Pass)"})@$($Pools.$Algorithm_Norm.Host):$($Pools.$Algorithm_Norm.Port) --cuda --cuda-devices $($DeviceIDsAll) --exit $($_.Params)"
 					HashRates      = [PSCustomObject]@{$Algorithm_Norm = $Global:StatsCache."$($Miner_Name)_$($Algorithm_Norm_0)_HashRate".Week }
 					API            = "Claymore"
 					Port           = $Miner_Port

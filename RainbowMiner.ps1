@@ -220,6 +220,7 @@ param(
     [Switch]$EnableOCVoltage = $false, # if set to $true, overclocking setting include voltage
     [Parameter(Mandatory = $false)]
     [Switch]$EnableOCLinuxSetAllPStates = $false, # if set to $true, all P-States will be get the mem/core clock offsets.
+    [String]$LinuxOCMethod = "nvidia-settings", # how core/memory offsets are set on Linux: nvidia-settings (needs X), nvml (no X) or auto (nvml only without X)
     [Parameter(Mandatory = $false)]
     [Switch]$EnableOCLinuxForcePState = $false, # if set to $true, all P-States will be forced to it's workload state.
     [Parameter(Mandatory = $false)]
@@ -423,6 +424,20 @@ $EnableMinerStatus = $true
 
 if ($MyInvocation.MyCommand.Path) {Set-Location (Split-Path $MyInvocation.MyCommand.Path)}
 
+# glibc keeps freed native memory in per-thread malloc arenas (up to eight per core), and with
+# RainbowMiner's runspaces that was about 500 MB of resident memory nothing used (2026-09-28:
+# 1481 -> 936 MB working set at one hour with MALLOC_ARENA_MAX=2). The arena limit itself must
+# come from the environment (glibc fixes it with the first extra arena, before this script runs);
+# from inside the process, malloc_trim hands the unused arena space back to the kernel, so the
+# core calls it once per round. musl and macOS have no glibc and are skipped
+if ([System.Environment]::OSVersion.Platform -eq "Unix") {
+    try {
+        Add-Type -Namespace RBM -Name Glibc -MemberDefinition '[DllImport("libc.so.6", EntryPoint = "mallopt")] public static extern int mallopt(int param, int value); [DllImport("libc.so.6", EntryPoint = "malloc_trim")] public static extern int malloc_trim(ulong pad);' -ErrorAction Stop
+        if (-not $env:MALLOC_ARENA_MAX) {[RBM.Glibc]::mallopt(-8, 2) > $null}
+        $Global:GlibcTrim = $true
+    } catch {$Global:GlibcTrim = $false}
+}
+
 Import-Module .\Modules\Include.psm1
 
 # sync helper binaries (7-Zip, curl, GetCPU, MSI Afterburner wrapper) from .\Includes\dist
@@ -431,33 +446,20 @@ try {Update-HelperBinaries} catch {}
 
 Initialize-Session
 
-$Session.Version         = "5.0.3.1"
+$Session.Version         = "5.0.3.2"
 $Session.MainWindowTitle = "RainbowMiner v$($Session.Version)"
 $Session.SetupOnly       = $SetupOnly
 $Session.LogLevel        = $LogLevel
 
-$Session.SupportedPSVersion = "7.6.5"
+$Session.SupportedPSVersion = "7.6.6"
 
 $Session.OpenCLPlatformSorting = @()
 
 #Add-Type -Path .\DotNet\OpenCL\*.cs
 #Add-Type -Path .\DotNet\Tools\RBMTools.cs
 
-if ($IsWindows) {
-    if ($Session.IsCore) {
-        Import-Module NetSecurity -ErrorAction Ignore -SkipEditionCheck
-        Import-Module Defender -ErrorAction Ignore -SkipEditionCheck
-        Import-Module NetTCPIP -ErrorAction Ignore -SkipEditionCheck
-        Import-Module "$env:Windir\System32\WindowsPowerShell\v1.0\Modules\NetSecurity\NetSecurity.psd1" -ErrorAction Ignore -SkipEditionCheck
-        Import-Module "$env:Windir\System32\WindowsPowerShell\v1.0\Modules\Defender\Defender.psd1" -ErrorAction Ignore -SkipEditionCheck
-        Import-Module "$env:Windir\System32\WindowsPowerShell\v1.0\Modules\NetTCPIP\NetTCPIP.psd1" -ErrorAction Ignore -SkipEditionCheck
-    } else {
-        Import-Module NetSecurity -ErrorAction Ignore
-        Import-Module Defender -ErrorAction Ignore
-        Import-Module "$env:Windir\System32\WindowsPowerShell\v1.0\Modules\NetSecurity\NetSecurity.psd1" -ErrorAction Ignore
-        Import-Module "$env:Windir\System32\WindowsPowerShell\v1.0\Modules\Defender\Defender.psd1" -ErrorAction Ignore
-    }
-}
+# NetSecurity, Defender and NetTCPIP are not imported in-process (~37 MB): Defender exclusions are read via CIM,
+# firewall rules via the registry, and the elevated helpers that change them import the module in their own process
 
 Import-Module .\Modules\API.psm1
 Import-Module .\Modules\Asyncloader.psm1
@@ -532,7 +534,7 @@ if ($IsWindows -and (Get-Command "Unblock-File" -ErrorAction SilentlyContinue)) 
 [hashtable]$Session.DefaultValues = @{}
 
 if (-not $psISE) {$MyCommandParameters = $MyInvocation.MyCommand.Parameters.Keys | Where-Object {$_ -and $_ -ne "ConfigFile" -and (Get-Variable $_ -ErrorAction Ignore)}}
-if (-not $MyCommandParameters) {$MyCommandParameters = @("Wallet","WorkerName","Interval","Region","DefaultPoolRegion","SSL","DeviceName","ExcludeDeviceName","Algorithm","MinerName","ExcludeAlgorithm","ExcludeMinerName","PreferMinerName","PreferMinerMargin","PoolName","ExcludePoolName","ExcludeCoin","ExcludeCoinSymbol","OpenCLPlatformSorting","Currency","ExcludeCurrencyRateFromCoinbase","Donate","Proxy","ProxyUsername","ProxyPassword","Delay","Watchdog","ExcludeFromWatchdog","MinerStatusUrl","MinerStatusKey","ShowRemoteMachines","MinerStatusEmail","PushOverUserKey","MinerStatusMaxTemp","DiskMinGB","MinFreeMemoryGB","GPUReservedVRAMGB","MinerStatusMaxCrashesPerHour","SwitchingPrevention","PoolSwitchingHysteresis","MinerSwitchingHysteresis","MaxRejectedShareRatio","MaxAllowedLuck","MaxTimeSinceLastBlock","MinComboOverSingleRatio","ShowMinerWindow","FastestMinerOnly","IgnoreFees","ExcludeMinersWithFee","DisableUnprofitableAlgolist","DisableUnprofitableCpuAlgolist","EnableNeverprofitableAlgos","EnableCheckMiningConflict","EnableCurl","EnableEthashZombieMode","ShowPoolBalances","ShowPoolBalancesDetails","ShowPoolBalancesExcludedPools","ExcludeCoinsymbolBalances","ShowWalletBalances","WalletBalances","DisableDualMining","EnableDualMiningDuringRentals","DisableZeroWattMiners","EnableRandomX1GBPages","APIport","APIuser","APIpassword","APIauth","APIthreads","APIlockConfig","APImaxLoginAttemps","APIblockLoginAttemptsTime","APIallowIPs","RebootOnGPUFailure","MiningMode","MSIApath","MSIAprofile","UIstyle","UIsorting","UIFullBenchmarkList","UseTimeSync","WebsitesForOnlineCheck","PowerPrice","PowerPriceCurrency","UsePowerPrice","PowerOffset","PowerOffsetPercent","PowerCPUtdp","OctopusTariffCode","PowerPriceApi","PowerPriceApiValue","PowerPriceApiInterval","FixedCostPerDay","ProfitabilityLevel","CheckProfitability","DisableExtendInterval","EthPillEnable","EthPillEnableMTP","EnableOCProfiles","EnableOCVoltage","EnableOCLinuxSetAllPStates","EnableOCLinuxForcePState","OCResetInterval","EnableOCFullReset","EnableLinuxMinerNiceness","LinuxMinerNiceness","EnableLinuxHeadless","EnableAutoUpdate","EnableAutoBenchmark","AutoBenchmarkMode","EnableAutoMinerPorts","StaticCPUMinerPort","StaticGPUMinerPort","EnableAutoAdjustAffinity","DisableMSIAmonitor","CPUMiningThreads","CPUMiningAffinity","GPUMiningAffinity","DisableAPI","DisableAsyncLoader","DisableInternetCheck","EnableMinerStatus","EnableFastSwitching","ForceStablePrice","EnableMinersAsRoot","NVSMIpath","MiningPriorityCPU","MiningPriorityGPU","AutoexecPriority","HashrateWeight","HashrateWeightStrength","PoolAccuracyWeight","EnablePoolAlternates","MaxPoolAlternates","MinerFaultToleranceGPU","MinerFaultToleranceCPU","BalanceUpdateMinutes","ProfitSpikeProtection","Quickstart","PoolDataWindow","PoolStatAverage","PoolStatAverageStable","EnableErrorRatio","MaxErrorRatio","EnableAutoAlgorithmAdd","EnableAlgorithmVariants","EnableAlgorithmMapping","EnableResetVega","EnableMiningHeatControl","MiningHeatControl","MaxActivityDays","MaxLogfileDays","MaxDownloadfileDays","MaxCachefileDays","StartPaused","EnableUpdateDuringPause","EnableUpdateWhenScheduled","EnablePauseOnActivity","EnablePauseOnBattery","ResumeOnInactivitySeconds","EnableFastlaneBenchmark","FastlaneBenchmarkTypeCPU","FastlaneBenchmarkTypeGPU","EnableFastlaneBenchmarkMissing","MinimumMiningIntervals","BenchmarkInterval","MaxCrashesDuringBenchmark","EnableAutoDisableMiners","MaxCrashesBeforeDisable","CrashTrackingWindowMinutes","AutoDisableResetHours","ServerName","ServerPort","ServerUser","ServerPassword","EnableServerConfig","EnableServerPools","ServerConfigName","GroupName","ExcludeServerConfigVars","EnableServerExcludeList","EnableMinerBackups","EnableKeepDownloads","RunMode","SetupOnly","EnableDebugMode","EnableDebugTimers","EnableVerboseAsyncloader","EnableRestartComputer","RestartComputerHours","RestartRBMTimespan","RestartRBMMemory","LinuxDisplay","LinuxXAuthority","LinuxMinerTerminal","CovalentAPIKey","UserAgent","LogLevel")}
+if (-not $MyCommandParameters) {$MyCommandParameters = @("Wallet","WorkerName","Interval","Region","DefaultPoolRegion","SSL","DeviceName","ExcludeDeviceName","Algorithm","MinerName","ExcludeAlgorithm","ExcludeMinerName","PreferMinerName","PreferMinerMargin","PoolName","ExcludePoolName","ExcludeCoin","ExcludeCoinSymbol","OpenCLPlatformSorting","Currency","ExcludeCurrencyRateFromCoinbase","Donate","Proxy","ProxyUsername","ProxyPassword","Delay","Watchdog","ExcludeFromWatchdog","MinerStatusUrl","MinerStatusKey","ShowRemoteMachines","MinerStatusEmail","PushOverUserKey","MinerStatusMaxTemp","DiskMinGB","MinFreeMemoryGB","GPUReservedVRAMGB","MinerStatusMaxCrashesPerHour","SwitchingPrevention","PoolSwitchingHysteresis","MinerSwitchingHysteresis","MaxRejectedShareRatio","MaxAllowedLuck","MaxTimeSinceLastBlock","MinComboOverSingleRatio","ShowMinerWindow","FastestMinerOnly","IgnoreFees","ExcludeMinersWithFee","DisableUnprofitableAlgolist","DisableUnprofitableCpuAlgolist","EnableNeverprofitableAlgos","EnableCheckMiningConflict","EnableCurl","EnableEthashZombieMode","ShowPoolBalances","ShowPoolBalancesDetails","ShowPoolBalancesExcludedPools","ExcludeCoinsymbolBalances","ShowWalletBalances","WalletBalances","DisableDualMining","EnableDualMiningDuringRentals","DisableZeroWattMiners","EnableRandomX1GBPages","APIport","APIuser","APIpassword","APIauth","APIthreads","APIlockConfig","APImaxLoginAttemps","APIblockLoginAttemptsTime","APIallowIPs","RebootOnGPUFailure","MiningMode","MSIApath","MSIAprofile","UIstyle","UIsorting","UIFullBenchmarkList","UseTimeSync","WebsitesForOnlineCheck","PowerPrice","PowerPriceCurrency","UsePowerPrice","PowerOffset","PowerOffsetPercent","PowerCPUtdp","OctopusTariffCode","PowerPriceApi","PowerPriceApiValue","PowerPriceApiInterval","FixedCostPerDay","ProfitabilityLevel","CheckProfitability","DisableExtendInterval","EthPillEnable","EthPillEnableMTP","EnableOCProfiles","EnableOCVoltage","EnableOCLinuxSetAllPStates","EnableOCLinuxForcePState","LinuxOCMethod","OCResetInterval","EnableOCFullReset","EnableLinuxMinerNiceness","LinuxMinerNiceness","EnableLinuxHeadless","EnableAutoUpdate","EnableAutoBenchmark","AutoBenchmarkMode","EnableAutoMinerPorts","StaticCPUMinerPort","StaticGPUMinerPort","EnableAutoAdjustAffinity","DisableMSIAmonitor","CPUMiningThreads","CPUMiningAffinity","GPUMiningAffinity","DisableAPI","DisableAsyncLoader","DisableInternetCheck","EnableMinerStatus","EnableFastSwitching","ForceStablePrice","EnableMinersAsRoot","NVSMIpath","MiningPriorityCPU","MiningPriorityGPU","AutoexecPriority","HashrateWeight","HashrateWeightStrength","PoolAccuracyWeight","EnablePoolAlternates","MaxPoolAlternates","MinerFaultToleranceGPU","MinerFaultToleranceCPU","BalanceUpdateMinutes","ProfitSpikeProtection","Quickstart","PoolDataWindow","PoolStatAverage","PoolStatAverageStable","EnableErrorRatio","MaxErrorRatio","EnableAutoAlgorithmAdd","EnableAlgorithmVariants","EnableAlgorithmMapping","EnableResetVega","EnableMiningHeatControl","MiningHeatControl","MaxActivityDays","MaxLogfileDays","MaxDownloadfileDays","MaxCachefileDays","StartPaused","EnableUpdateDuringPause","EnableUpdateWhenScheduled","EnablePauseOnActivity","EnablePauseOnBattery","ResumeOnInactivitySeconds","EnableFastlaneBenchmark","FastlaneBenchmarkTypeCPU","FastlaneBenchmarkTypeGPU","EnableFastlaneBenchmarkMissing","MinimumMiningIntervals","BenchmarkInterval","MaxCrashesDuringBenchmark","EnableAutoDisableMiners","MaxCrashesBeforeDisable","CrashTrackingWindowMinutes","AutoDisableResetHours","ServerName","ServerPort","ServerUser","ServerPassword","EnableServerConfig","EnableServerPools","ServerConfigName","GroupName","ExcludeServerConfigVars","EnableServerExcludeList","EnableMinerBackups","EnableKeepDownloads","RunMode","SetupOnly","EnableDebugMode","EnableDebugTimers","EnableVerboseAsyncloader","EnableRestartComputer","RestartComputerHours","RestartRBMTimespan","RestartRBMMemory","LinuxDisplay","LinuxXAuthority","LinuxMinerTerminal","CovalentAPIKey","UserAgent","LogLevel")}
 $MyCommandParameters | Foreach-Object {
     if ($var = Get-Variable $_ -ErrorAction Ignore) {
         if ($var.Value -is [switch]) {

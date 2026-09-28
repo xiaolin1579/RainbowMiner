@@ -14,7 +14,14 @@ function Read-ConsoleKeyGuarded {
     # press, up to 10 repeats. Ctrl+C stays single-press only, because the
     # miner cleanup loops emit the exact pattern C-c C-c and a stray
     # delivery of it must never stop the core
-    if (-not [System.Console]::KeyAvailable) {return}
+    # without a console (systemd unit, nohup, docker) KeyAvailable throws on every poll
+    if ($Script:ConsoleKeyUnavailable -or [System.Console]::IsInputRedirected) {return}
+    try {
+        if (-not [System.Console]::KeyAvailable) {return}
+    } catch {
+        $Script:ConsoleKeyUnavailable = $true
+        return
+    }
     $keyBatch = [System.Collections.Generic.List[System.ConsoleKeyInfo]]::new()
     while ([System.Console]::KeyAvailable -and $keyBatch.Count -lt 4096) {
         [void]$keyBatch.Add([System.Console]::ReadKey($true))
@@ -917,7 +924,7 @@ function Invoke-Core {
     
     #Error in Config.txt
     if ($Session.Config -isnot [PSCustomObject]) {
-        Write-Log -Level Error "$($Session.ConfigFiles["Config"].Path) is invalid. Cannot continue. "
+        Write-Log -Level Error "$(if ($Session.ConfigFiles["Config"].Path) {$Session.ConfigFiles["Config"].Path} else {"config.txt"}) could not be loaded (see the error above, usually a JSON syntax error). Cannot continue. "
         Start-Sleep 10
         Break
     }
@@ -1020,6 +1027,18 @@ function Invoke-Core {
         if ($Session.Config.RestartRBMMemory -lt 367001600) {$Session.Config.RestartRBMMemory = 0}
 
         if ($IsLinux) {
+            if ("$($Session.Config.LinuxOCMethod)".ToLower() -notin @("nvidia-settings","auto","nvml")) {
+                $Session.Config | Add-Member LinuxOCMethod "nvidia-settings" -Force
+            } elseif ("$($Session.Config.LinuxOCMethod)".ToLower() -ne "nvidia-settings" -and $Session.Config.EnableOCProfiles) {
+                # the NVML helper is a python3 script run by the ocdaemon; without either, Test-NvmlOC
+                # falls back to nvidia-settings silently - say so once, python3 is not on every distro
+                if (-not (Get-Command "python3" -ErrorAction Ignore)) {
+                    Write-Log -Level Warn "config.txt: LinuxOCMethod=`"$($Session.Config.LinuxOCMethod)`" needs python3 (Arch: pacman -S python, Debian/Ubuntu: apt install python3), using nvidia-settings"
+                } elseif (-not (Test-OCDaemon)) {
+                    Write-Log -Level Warn "config.txt: LinuxOCMethod=`"$($Session.Config.LinuxOCMethod)`" needs the ocdaemon (run install.sh as root), using nvidia-settings"
+                }
+            }
+
             if ($Session.Config.LinuxMinerTerminal -notin @("auto","screen","tmux")) {
                 $Session.Config.LinuxMinerTerminal = "auto"
             } 
@@ -2180,12 +2199,37 @@ function Invoke-Core {
         if ($IsLinux) {
             $Session.OCDaemonOnEmptyAdd = [System.Collections.ArrayList]::new()
 
-            if ($Session.Config.EnableLinuxHeadless) {
-                if ($Session.Config.LinuxDisplay) {
-                    [void]$Session.OCDaemonOnEmptyAdd.Add("export DISPLAY=$($Session.Config.LinuxDisplay)")
+            $LinuxDisplay    = "$($Session.Config.LinuxDisplay)" -replace "[`"']"
+            $LinuxXAuthority = "$($Session.Config.LinuxXAuthority)" -replace "[`"']"
+
+            if ($Session.Config.EnableOCProfiles) {
+                if ($LinuxDisplay -match "^\d+(\.\d+)?$") {
+                    Write-Log -Level Warn "LinuxDisplay `"$($LinuxDisplay)`" lacks the leading colon, using `":$($LinuxDisplay)`""
+                    $LinuxDisplay = ":$($LinuxDisplay)"
                 }
-                if ($Session.Config.LinuxXAuthority) {
-                    [void]$Session.OCDaemonOnEmptyAdd.Add("export XAUTHORITY=$($Session.Config.LinuxXAuthority)")
+                if (-not $LinuxXAuthority) {
+                    $LinuxXAuthority = "$(Get-LinuxXAuthority | Select-Object -First 1)" -replace "[`"']"
+                    if ($LinuxXAuthority) {Write-Log -Level Info "LinuxXAuthority is empty, using detected $($LinuxXAuthority)"}
+                } elseif (-not (Test-Path $LinuxXAuthority -PathType Leaf -ErrorAction Ignore)) {
+                    Write-Log -Level Info "LinuxXAuthority $($LinuxXAuthority) is not readable for RainbowMiner (fine, if it belongs to another user)"
+                }
+            }
+
+            if ($Session.Config.EnableLinuxHeadless) {
+                if ($LinuxDisplay) {
+                    [void]$Session.OCDaemonOnEmptyAdd.Add("export DISPLAY=`"$($LinuxDisplay)`"")
+                }
+                if ($LinuxXAuthority) {
+                    [void]$Session.OCDaemonOnEmptyAdd.Add("export XAUTHORITY=`"$($LinuxXAuthority)`"")
+                }
+            } else {
+                # the ocdaemon runs as root without a desktop session, so it has no
+                # DISPLAY: fill in the values only where the environment has none
+                if ($LinuxDisplay) {
+                    [void]$Session.OCDaemonOnEmptyAdd.Add("export DISPLAY=`"`${DISPLAY:-$($LinuxDisplay)}`"")
+                }
+                if ($LinuxXAuthority) {
+                    [void]$Session.OCDaemonOnEmptyAdd.Add("export XAUTHORITY=`"`${XAUTHORITY:-$($LinuxXAuthority)}`"")
                 }
             }
 
@@ -2196,6 +2240,7 @@ function Invoke-Core {
                 Set-OCDaemon "sleep 1" -OnEmptyAdd $Session.OCDaemonOnEmptyAdd
                 Invoke-NvidiaSettings -SetPowerMizer
                 Invoke-OCDaemon -FilePath ".\IncludesLinux\bash\oc_init.sh" -Quiet > $null
+                Update-NvidiaOCMap
             }
         }
 
@@ -2338,7 +2383,7 @@ function Invoke-Core {
                                         $newMiner.Affinity = "0x{0:x$(if($CPUAffinityInt -lt 65536){4}else{8})}" -f $CPUAffinityInt
                                         if (-not $newMiner.Threads) {
                                             $CPUThreads = @(ConvertFrom-CPUAffinity $newMiner.Affinity).Count
-                                            if ($newMiner.Threads -eq $null) {$newMiner | Add-Member Threads $Threads -Force} else {$newMiner.Threads = $CPUThreads}
+                                            if ($newMiner.Threads -eq $null) {$newMiner | Add-Member Threads $CPUThreads -Force} else {$newMiner.Threads = $CPUThreads}
                                         }
                                     } else {
                                         $newMiner.Affinity = ""
@@ -3274,12 +3319,15 @@ function Invoke-Core {
             $Miner_Devices = @($Miner.DeviceName | Sort-Object)
             $Seed_Group    = "$($Miner.Name -replace '(-(?:GPU|CPU)#\d+)+$')|$($Miner_Algo)"
             if (-not $Seed_Index.ContainsKey($Seed_Group)) {continue}
+            $Seed_Version  = "$(Get-MinerVersion $Miner.Version)"
 
             # prefer a measured sibling over a seeded one, then the one with the most devices
             $Seed_Source = $null
             foreach ($Seed_Item in $Seed_Index[$Seed_Group]) {
                 $Seed_Stat = $Global:StatsCache[$Seed_Item.Key]
                 if ($Seed_Stat -eq $null -or -not ([double]$Seed_Stat.Week -gt 0)) {continue}
+                # only a sibling of the current miner version: the version check further down removes an older seed again, which reseeds it every round
+                if ("$($Seed_Stat.Version)" -ne $Seed_Version) {continue}
                 if (($Seed_Item.Devices -join '-') -eq ($Miner_Devices -join '-')) {continue}
                 if (@($Seed_Item.Devices | Where-Object {$Seed_Models[$_] -ne $Miner.DeviceModel}).Count) {continue}
                 $Seed_IsFL = [bool]$Seed_Stat.IsFL
@@ -3306,8 +3354,8 @@ function Invoke-Core {
             }
         }
 
-        $Seed_Models = $Seed_Index = $Seed_Source = $Seed_Stat = $Seed_Item = $Seed_Key = $Seed_Group = $Seed_Factor = $Seed_IsFL = $Miner_HR = $Miner_Algo = $Miner_Devices = $null
-        Remove-Variable -Name Seed_Models, Seed_Index, Seed_Source, Seed_Stat, Seed_Item, Seed_Key, Seed_Group, Seed_Factor, Seed_IsFL, Miner_HR, Miner_Algo, Miner_Devices -ErrorAction Ignore
+        $Seed_Models = $Seed_Index = $Seed_Source = $Seed_Stat = $Seed_Item = $Seed_Key = $Seed_Group = $Seed_Factor = $Seed_IsFL = $Seed_Version = $Miner_HR = $Miner_Algo = $Miner_Devices = $null
+        Remove-Variable -Name Seed_Models, Seed_Index, Seed_Source, Seed_Stat, Seed_Item, Seed_Key, Seed_Group, Seed_Factor, Seed_IsFL, Seed_Version, Miner_HR, Miner_Algo, Miner_Devices -ErrorAction Ignore
     }
     $Seed_Candidates = $null
     Remove-Variable -Name Seed_Candidates -ErrorAction Ignore
@@ -3710,7 +3758,9 @@ function Invoke-Core {
                     }
                     $NeedsReset = $true
 
-                } else {
+                } elseif ($Global:StatsCache.ContainsKey($Miner_StatKey)) {
+                    # only an existing stat gets the version stamp: without one, the null
+                    # roundtrip below threw "The property 'Duration' cannot be found"
 
                     $Miner_Version = $AllMiners_VersionCheck[$Miner.BaseName].Version
 
@@ -3722,7 +3772,7 @@ function Invoke-Core {
 
                     try {
                         $Miner_Stat = $Global:StatsCache[$Miner_StatKey] | ConvertTo-Json -Depth 10 | ConvertFrom-Json -ErrorAction Ignore
-                        $Miner_Stat.Duration = [string]$Miner_Stat.Duration
+                        $Miner_Stat.Duration = [string]$Global:StatsCache[$Miner_StatKey].Duration
                         $Miner_Stat.IsFL     = [bool]$Miner_Stat.IsFL
                         $Miner_Stat | ConvertTo-Json -Depth 10 | Set-Content ".\Stats\Miners\$($Global:DeviceCache.DevicesToVendors[$Miner.DeviceModel])-$($Miner_StatKey).txt"
 
@@ -3736,7 +3786,7 @@ function Invoke-Core {
                                 }
 
                                 $Miner_Stat = $Global:StatsCache[$Miner_StatKey] | ConvertTo-Json -Depth 10 | ConvertFrom-Json -ErrorAction Ignore
-                                $Miner_Stat.Duration = [string]$Miner_Stat.Duration
+                                $Miner_Stat.Duration = [string]$Global:StatsCache[$Miner_StatKey].Duration
                                 $Miner_Stat.IsFL     = [bool]$Miner_Stat.IsFL
                                 $Miner_Stat | ConvertTo-Json -Depth 10 | Set-Content ".\Stats\Miners\$($Global:DeviceCache.DevicesToVendors[$Miner.DeviceModel])-$($Miner_StatKey).txt"
                             }
@@ -4593,6 +4643,12 @@ function Invoke-Core {
         }
     }
 
+    # the OC reset of stopped miners is only queued: run it now, so that GPUs
+    # without a follow-up miner do not keep the old clocks
+    if ($IsLinux -and $Session.Config.EnableOCprofiles -and $Global:GlobalOCD.Count) {
+        Invoke-OCDaemon -FilePath ".\IncludesLinux\bash\oc_reset.sh" | Write-OCDaemonResult -Name "OC reset"
+    }
+
     #Kill maroding miners
     $Running_ProcessIds = [System.Collections.Generic.HashSet[int]]::new()
     $Miner = $null
@@ -4734,7 +4790,7 @@ function Invoke-Core {
                     }
                 } elseif ($Session.Config.EnableOCprofiles) {
                     $Miner.SetOCprofile($Session.Config, 500)
-                    if ($IsLinux) { Invoke-OCDaemon -Miner $Miner -Quiet > $null }
+                    if ($IsLinux) { Invoke-OCDaemon -Miner $Miner | Write-OCDaemonResult -Name "OC $($Miner.Name)" }
                 }
 
                 $Miner.SetStaticPort($Session.Config.StaticGPUMinerPort)
@@ -5255,12 +5311,36 @@ function Invoke-Core {
 
     if ($Global:Error.Count) {
         $logDate = Get-Date -Format "yyyy-MM-dd"
-        foreach ($err in $Global:Error) {
-            if ($err.Exception.Message) {
-                Write-ToFile -FilePath "Logs\errors_$logDate.main.txt" -Message "$($err.Exception.Message)" -Append -Timestamp
+        # one line per distinct message and position per round: a miner API that is not up yet
+        # answers every poll with the same refused connection and flooded the file
+        # a miner that has just been started refuses its API port until it is ready (a DAG build takes
+        # minutes): polls refused during the first five minutes of a miner are expected, not errors
+        $errSkipPorts = @{}
+        foreach ($errMiner in $Global:ActiveMiners) {
+            if ($errMiner.Port -and $errMiner.StartTime -and $errMiner.StartTime -ne [DateTime]::MinValue -and ((Get-Date).ToUniversalTime() - $errMiner.StartTime).TotalSeconds -lt 300) {
+                $errSkipPorts["$($errMiner.Port)"] = $true
             }
         }
+        $errSeen = [ordered]@{}
+        foreach ($err in $Global:Error) {
+            if ($err.Exception.Message) {
+                if ($errSkipPorts.Count -and $err.Exception.Message -match "Connection refused \(127\.0\.0\.1:(\d+)\)" -and $errSkipPorts.ContainsKey($Matches[1])) {continue}
+                # add the script position: a bare "Cannot convert null to type System.DateTime" cannot be traced otherwise
+                $errLoc = if ($err.InvocationInfo.ScriptName) {" [$(Split-Path $err.InvocationInfo.ScriptName -Leaf):$($err.InvocationInfo.ScriptLineNumber)]"} elseif ($err.ScriptStackTrace) {" [$("$($err.ScriptStackTrace)".Split("`n")[0].Trim())]"} else {""}
+                $errKey = "$($err.Exception.Message)$($errLoc)"
+                if ($errSeen.Contains($errKey)) {$errSeen[$errKey]++} else {$errSeen[$errKey] = 1}
+            }
+        }
+        foreach ($errKey in $errSeen.Keys) {
+            Write-ToFile -FilePath "Logs\errors_$logDate.main.txt" -Message "$($errKey)$(if ($errSeen[$errKey] -gt 1) {" (x$($errSeen[$errKey]))"})" -Append -Timestamp
+        }
+        $errLoc = $errKey = $errSeen = $errSkipPorts = $errMiner = $null
         $Global:Error.Clear()
+    }
+
+    # give freed native memory back to the kernel once per round (glibc arenas keep it otherwise), see RainbowMiner.ps1
+    if ($Global:GlibcTrim) {
+        try {[RBM.Glibc]::malloc_trim(0) > $null} catch {$Global:GlibcTrim = $false}
     }
 
     Get-Job | Where-Object {$_.State -in @("Completed","Stopped","Failed") -and $_.Name -notmatch "^WebRequest-"} | Foreach-Object {
@@ -5715,12 +5795,16 @@ function Stop-Core {
             if ($Miner.GetStatus() -eq [MinerStatus]::Running) {
                 Write-Log "Closing miner $($Miner.Name)"
                 $Miner.StopMining()
+                if ($Session.Config.EnableOCprofiles) {$Miner.ResetOCprofile(0)}
             }
             if ($Miner.BaseName -like "Excavator*" -and -not $ExcavatorWindowsClosed.Contains($Miner.BaseName)) {
                 $Miner.ShutDownMiner()
                 [void]$ExcavatorWindowsClosed.Add($Miner.BaseName)
             }
         }
+    }
+    if ($IsLinux -and $Session.Config.EnableOCprofiles -and $Global:GlobalOCD.Count) {
+        Invoke-OCDaemon -FilePath ".\IncludesLinux\bash\oc_reset.sh" -Quiet > $null
     }
     Stop-MinerRunspacePool
     if ($IsWindows) {
@@ -6730,7 +6814,7 @@ function Update-ActiveMiners {
             }
 
             Switch ("$($Miner_Status)") {
-                "Running"       {if ($Session.Config.EnableOCprofiles -and ($Miner.DeviceName -notlike "CPU*") -and ($Session.Config.OCResetInterval -gt 0) -and ($Miner.GetLastSetOCTime() -lt (Get-Date).AddSeconds(-$Session.Config.OCResetInterval).ToUniversalTime() -or $API.ApplyOC)) {$Miner.SetOCprofile($Session.Config,500);if ($IsLinux) {Invoke-OCDaemon -Miner $Miner -Quiet > $null};$API.ApplyOC=$false};$MinersUpdated++;Break}
+                "Running"       {if ($Session.Config.EnableOCprofiles -and ($Miner.DeviceName -notlike "CPU*") -and ($Session.Config.OCResetInterval -gt 0) -and ($Miner.GetLastSetOCTime() -lt (Get-Date).AddSeconds(-$Session.Config.OCResetInterval).ToUniversalTime() -or $API.ApplyOC)) {$Miner.SetOCprofile($Session.Config,500);if ($IsLinux) {Invoke-OCDaemon -Miner $Miner | Write-OCDaemonResult -Name "OC $($Miner.Name)"};$API.ApplyOC=$false};$MinersUpdated++;Break}
                 "RunningFailed" {$Miner.ResetMinerData();$MinersFailed++;if ($Miner.IsExclusiveMiner) {$ExclusiveMinersFailed++};Break}
             }
         }
@@ -6863,19 +6947,25 @@ function Set-Total {
         if (Test-Path $Path) {Write-Log -Level $(if ($Quiet) {"Info"} else {"Warn"}) "Could not write to $($PathCsv_Name) "}
     }
 
-    $Stat = Get-ContentByStreamReader $Path
-
-    try {
-        $Stat = $Stat | ConvertFrom-Json -ErrorAction Stop
-        if ($Stat.ProfitApi -eq $null) {$Stat | Add-Member ProfitApi 0 -Force}
-        $Stat.Duration  += $Duration.TotalMinutes
-        $Stat.Cost      += $TotalCost
-        $Stat.Profit    += $TotalProfit
-        $Stat.ProfitApi += $TotalProfitApi
-        $Stat.Power     += $TotalPower
-        $Stat.Updated    = $Updated_UTC
-    } catch {
-        if (Test-Path $Path) {Write-Log -Level $(if ($Quiet) {"Info"} else {"Warn"}) "Totals file ($Path_Name) is corrupt and will be reset. "}
+    # a pool's first totals file does not exist yet: build it without going through an exception
+    $Stat = $null
+    if (Test-Path $Path) {
+        try {
+            $Stat = Get-ContentByStreamReader $Path | ConvertFrom-Json -ErrorAction Stop
+            if ($Stat.Duration -eq $null) {throw "no Duration field"}
+            if ($Stat.ProfitApi -eq $null) {$Stat | Add-Member ProfitApi 0 -Force}
+            $Stat.Duration  += $Duration.TotalMinutes
+            $Stat.Cost      += $TotalCost
+            $Stat.Profit    += $TotalProfit
+            $Stat.ProfitApi += $TotalProfitApi
+            $Stat.Power     += $TotalPower
+            $Stat.Updated    = $Updated_UTC
+        } catch {
+            Write-Log -Level $(if ($Quiet) {"Info"} else {"Warn"}) "Totals file ($Path_Name) is corrupt and will be reset. "
+            $Stat = $null
+        }
+    }
+    if (-not $Stat) {
         $Stat = [PSCustomObject]@{
                     Pool          = $Miner.Pool[0]
                     Duration      = $Duration.TotalMinutes
@@ -6909,12 +6999,13 @@ function Set-TotalsAvg {
     $Last1d = (Get-Date).AddDays(-1)
     $Last1w = (Get-Date).AddDays(-7)
 
-    Get-ChildItem "Stats\Totals" -Filter "Totals_*.csv" | Where-Object {$_.BaseName -lt $LastValid_File} | Foreach-Object {Remove-Item $_.FullName -Force -ErrorAction Ignore}
+    # the folder appears with the first Set-Total: a fresh install has none yet
+    Get-ChildItem "Stats\Totals" -Filter "Totals_*.csv" -ErrorAction Ignore | Where-Object {$_.BaseName -lt $LastValid_File} | Foreach-Object {Remove-Item $_.FullName -Force -ErrorAction Ignore}
 
     if ($CleanupOnly) {return}
 
     $Totals = [PSCustomObject]@{}
-    Get-ChildItem "Stats\Totals" -Filter "*_TotalAvg.txt" | Foreach-Object {
+    Get-ChildItem "Stats\Totals" -Filter "*_TotalAvg.txt" -ErrorAction Ignore | Foreach-Object {
         $PoolName = $_.BaseName -replace "_TotalAvg"
         $Started = (Get-ContentByStreamReader $_.FullName | ConvertFrom-Json -ErrorAction Ignore).Started
         $Totals | Add-Member $PoolName ([PSCustomObject]@{
@@ -6938,7 +7029,7 @@ function Set-TotalsAvg {
 
     try {
         $FirstDate = $CurrentDate = ""
-        Get-ChildItem "Stats\Totals" -Filter "Totals_*.csv" | Where-Object {$_.BaseName -ge $Last1w_File} | Sort-Object BaseName | Foreach-Object {
+        Get-ChildItem "Stats\Totals" -Filter "Totals_*.csv" -ErrorAction Ignore | Where-Object {$_.BaseName -ge $Last1w_File} | Sort-Object BaseName | Foreach-Object {
             Import-Csv $_.FullName -ErrorAction Ignore | Where-Object {$_.Date -ge $Last1w -and [decimal]$_.Profit -gt 0 -and $_.Donation -ne "1" -and $Totals."$($_.PoolName)" -ne $null} | Foreach-Object {
                 if (-not $FirstDate) {$FirstDate = $_.Date}
                 $CurrentDate = $_.Date
@@ -7012,7 +7103,7 @@ function Set-Balance {
         try {
             $Stat = Get-ContentByStreamReader $Path | ConvertFrom-Json -ErrorAction Stop
 
-            $Stat_LastEarnings = [System.Collections.ArrayList]::new(@($Stat.Last_Earnings | Foreach-Object {[PSCustomObject]@{Date = [DateTime]$_.Date;Value = [Decimal]$_.Value}} | Select-Object))
+            $Stat_LastEarnings = [System.Collections.ArrayList]::new(@($Stat.Last_Earnings | Where-Object {$_.Date} | Foreach-Object {[PSCustomObject]@{Date = [DateTime]$_.Date;Value = [Decimal]$_.Value}} | Select-Object))
 
             $Stat = [PSCustomObject]@{
                         PoolName = $Balance.Name
