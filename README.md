@@ -95,7 +95,7 @@ operation and the remaining configuration files.
     - [Nvidia Driver Version v471.41 - Windows 7,8,8.1](https://international.download.nvidia.com/Windows/471.41/471.41-desktop-win7-64bit-international-whql.exe) (the last series that supports Windows 7/8.1)
     - [AMD Adrenalin 2022 Edition 22.3.2](https://drivers.amd.com/drivers/amd-software-adrenalin-edition-22.3.2-win10-win11-march24.exe)
 4. If your rig contains AMD graphic cards, RainbowMiner's overclocking features rely on MSI Afterburner, you should install and run it: [Download](http://download.msi.com/uti_exe//vga/MSIAfterburnerSetup.zip)
-5. If you want to have accurate power and clock values for your CPU, please install the [PawnIO driver](https://github.com/namazso/PawnIO.Setup/releases/latest/download/PawnIO_setup.exe) available from here: https://pawnio.eu/
+5. For accurate power and clock values of your CPU, the [PawnIO driver](https://github.com/namazso/PawnIO.Setup/releases/latest/download/PawnIO_setup.exe) (https://pawnio.eu/) is needed. `Install.bat` installs it automatically - on an existing installation, run `Install.bat` once more, or download and start the installer by hand. Without it, RainbowMiner only sees the CPU load and estimates the power draw from the CPU's TDP. PawnIO replaces the old WinRing0 driver, which Windows now flags as malicious
 
 Finally: check, if Powershell 7 is in your PATH, because RainbowMiner will not run correctly, if the path to powershell is missing. Sometimes `C:\Program Files\PowerShell\7` has to be added manually to the PATH environment variable after installing PowerShell 7. Here is a nice tutorial, on how to add to PATH environment variable https://www.howtogeek.com/118594/how-to-edit-your-system-path-for-easy-command-line-access/amp/
 
@@ -269,8 +269,8 @@ The very same commands are available as buttons on the **Console** page of the w
 
 - Set your Windows virtual memory size to a fixed size, to the sum of your GPU memories x 1.1, e.g. if you have 6x GTX1070 8GB installed, use at least 53000 (Computer Properties->Advanced System Settings->Performance->Advanced->Virtual Memory)
 - Submit bugs and feature requests here: https://github.com/RainbowMiner/RainbowMiner/issues 
-- Find a lot of additional information and documentation here: https://github.com/RainbowMiner/RainbowMiner/issues?q=is%3Aissue+label%3Adocumentation
-- if mining on GeForce GTX 1070/GTX 1070Ti/GTX 1080/GTX 1080Ti, it is recommended to set "Force P2-State" to "Off", so that the card will always operate in P0 state. [How to set P0 state for my GTX1070 and GTX1080](https://github.com/RainbowMiner/RainbowMiner/issues/36)
+- Find all documentation in the [Doc](Doc) folder - see the overview in section [DOCUMENTATION](#documentation)
+- if mining on GeForce GTX 1070/GTX 1070Ti/GTX 1080/GTX 1080Ti, it is recommended to set "Force P2-State" to "Off", so that the card will always operate in P0 state. [The Nvidia P2 state](Doc/OVERCLOCKING.md#the-nvidia-p2-state)
 - Important: **NEVER EDIT THE "Start.bat" or "StartWD.bat" !** It will break the autoupdate. If you want to add commands to the start, edit .\Config\autoexec.txt
 - the root directory of RainbowMiner contains the following, additional batch files:
 
@@ -307,6 +307,7 @@ The very same commands are available as buttons on the **Console** page of the w
 | `ResetBenchmarkNVIDIA.bat` | -                          | reset all NVIDIA benchmarks                                                                                                                                             |
 | `ResetProfit.bat`          | -                          | reset RainbowMiner's profit calculation                                                                                                                                 |
 | `TouchBenchmark.bat`       | -                          | avoid benchmark of new miners, will set the timestamp of all miner stat files to now                                                                                    |
+| `CopyGpuStats.bat`         | `./copygpustats.sh`        | copy the benchmarks of one GPU to another, e.g. when a card dropped out and the GPU numbers shifted (stop RainbowMiner first)                                           |
 | `Stopp.bat`                | `./stopp.sh`               | halt RainbowMiner at once                                                                                                                                               |
   	
 
@@ -377,7 +378,7 @@ The pages are grouped in the menu on the left.
 - **JSON Editor**: edit any of the config files directly, with a syntax check before saving
 - **Running Config**: the configuration, that the running RainbowMiner actually uses (config files, presets and - on a client - the server's config, all merged)
 - **Get setup.json**: download this rig's configuration, to copy it to a new rig (see section [COPY CURRENT CONFIGURATION TO NEW RIGS](#copy-current-configuration-to-new-rigs))
-- **Get Minerstats**: download a backup zip of one or all miner benchmarks
+- **Minerstats Backup**: back up all miner benchmarks on the rig, restore or delete a backup, or download a zip of one or all miners (see section [Backing up and restoring benchmarks](#backing-up-and-restoring-benchmarks))
 - **Debug File**: download a zip with the miner start scripts, the miner logs, the configuration and the details of your system. This is the fastest way to collect everything that is needed for a bug report - please attach it, when you open an [issue](https://github.com/RainbowMiner/RainbowMiner/issues)
 
 **MRR** (only shown, if the pool MiningRigRentals is in use)
@@ -534,6 +535,32 @@ starts the profit statistics over, or delete single files in `Stats\Pools`
 (`<poolname>_<algorithm>_Profit.txt`). Expect more switching for a while afterwards, until
 the stable price has settled again.
 
+### Backing up and restoring benchmarks
+
+Benchmarks take time, so it is worth keeping a copy - before a driver or miner update, before
+experiments with overclocking, or simply now and then. Open **Config > Minerstats Backup** in
+the web interface:
+
+- **Create Backup now** zips all benchmark files of `Stats\Miners` into
+  `Stats\Backups\minerstats_<date>_<time>.zip` on the rig
+- the list below shows all backups with their date and number of benchmarks. Every row can be
+  downloaded, restored or deleted
+- **Restore** replaces all current benchmarks with the ones from the backup. The current
+  benchmarks are saved as a "before restore" backup first, so a restore can always be undone.
+  RainbowMiner uses the restored benchmarks from the next round on, no restart needed
+- restore and delete are blocked, while "APIlockConfig" is set to 1 in config.txt
+- **Download a zip** at the bottom of the page fetches a zip of one or all miners, e.g. to copy
+  the benchmarks to a rig with the same cards
+
+If a card drops out (e.g. after a power outage) the GPU numbers of the following cards shift,
+and RainbowMiner would benchmark them again. `CopyGpuStats.bat` (Windows) or
+`./copygpustats.sh` (Linux) copies the benchmarks of one GPU number to another. Stop
+RainbowMiner first, then enter the GPU numbers when asked - e.g. from 5 to 3, if the card
+GPU#05 now shows up as GPU#03. Only the benchmarks of that single card are copied, those of
+device combinations stay untouched, and replaced files are moved to
+`Stats\Miners-backup-<timestamp>`. Once the missing card is back, its original benchmarks
+are still there.
+
 ### Presets
 
 RainbowMiner ships with presets for a number of miner/algorithm combinations
@@ -556,10 +583,6 @@ The following miners can be fine tuned, using config files. Most of the config f
 
 | Minername        | Type   | Path                      | Configfile(s)                         | Documentation Link                                               |
 | ---------------- | ------ | ------------------------- | ------------------------------------- | ---------------------------------------------------------------- |
-| FireIce/XMR-Stak | AMD    | Bin\\Cryptonight-FireIce  | amd.txt                               | https://github.com/fireice-uk/xmr-stak/blob/master/doc/tuning.md |
-| FireIce/XMR-Stak | CPU    | Bin\\Cryptonight-FireIce  | cpu.txt                               | https://github.com/fireice-uk/xmr-stak/blob/master/doc/tuning.md |
-| FireIce/XMR-Stak | NVIDIA | Bin\\Cryptonight-FireIce  | nvidia.txt                            | https://github.com/fireice-uk/xmr-stak/blob/master/doc/tuning.md |
-| JceminerCpu      | CPU    | Bin\\CPU-Jceminer         | config\_[algorithm]-CPU.txt           | https://bitcointalk.org/index.php?topic=3281187.0                |
 | SrbMiner         | AMD    | Bin\\Cryptonight-Srbminer | config\_[algorithm]-[devicemodel].txt | https://bitcointalk.org/index.php?topic=3167363.0                |
 | Xmrig            | CPU    | Bin\\ANY-Xmrig            | threads\_[algorithm]\_[hwsig].json     | https://xmrig.com/docs/miner/config                              |
 
