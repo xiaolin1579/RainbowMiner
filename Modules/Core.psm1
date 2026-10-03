@@ -901,6 +901,13 @@ function Invoke-Core {
                         Write-Log "Proxy settings have changed: Restarting HttpClient$(if ($RestartRunspaces) {" and Runspaces"})"
                         Initialize-HttpClient -Restart > $null
                     }
+                    if ($Session.RoundCounter -gt 0 -and $ConfigBackup -and "$($Session.Config.ServerSSL)|$($Session.Config.ServerCertHash)" -ne "$($ConfigBackup.ServerSSL)|$($ConfigBackup.ServerCertHash)") {
+                        # pooled https connections keep the certificate check of their handshake: start over with the new settings
+                        if ((Test-Path Variable:Global:AsyncLoader) -and -not $AsyncLoader.Pause) {$AsyncLoader.Pause = $true}
+                        $RestartRunspaces = $true
+                        Write-Log "Server certificate settings have changed: Restarting HttpClient and Runspaces"
+                        Initialize-HttpClient -Restart > $null
+                    }
                 }
 
                 $ReReadConfig = $false
@@ -3945,19 +3952,22 @@ function Invoke-Core {
         $Miners_DownloadList    = @($AllMiners | Where-Object {$AllMiners_VersionCheck[$_.BaseName].Ok -ne $true} | Sort-Object {$_.ExtendInterval} -Descending | Select-Object -Unique @{name = "URI"; expression = {$_.URI}}, @{name = "Path"; expression = {$_.Path}}, @{name = "IsMiner"; expression = {$true}})
         $Miners_DownloadListPrq = @($AllMiners | Where-Object {$_.PrerequisitePath -and -not (Test-Path "$($_.PrerequisitePath)")} | Select-Object -Unique @{name = "URI"; expression = {$_.PrerequisiteURI}}, @{name = "Path"; expression = {$_.PrerequisitePath}}, @{name = "IsMiner"; expression = {$false}})
 
+        # the downloader skips the folders of running miners - pass them along instead of letting it ask the API
+        $Miners_RunningPaths = [PSCustomObject]@{IsRunningMinerPaths = $true; Paths = [string[]]@($Global:ActiveMiners.Where({$_.Status -eq [MinerStatus]::Running}).ForEach({$_.Path}) | Select-Object -Unique)}
+
         if ($Miners_DownloadList.Count -gt 0) {
             if ($Global:Downloader.State -ne "Running") {
                 Clear-Host
                 Write-Log "Starting download of $($Miners_DownloadList.Count) miners."
                 if ($Session.RoundCounter -eq 0) {Write-Host "Starting downloader ($($Miners_DownloadList.Count) miners) .."}
-                $Global:Downloader = Start-ThreadJob -InitializationScript ([scriptblock]::Create("Set-Location `"$((Get-Location).Path -replace '"','``"')`"")) -ArgumentList ($Miners_DownloadList) -FilePath .\Scripts\Downloader.ps1
+                $Global:Downloader = Start-ThreadJob -InitializationScript ([scriptblock]::Create("Set-Location `"$((Get-Location).Path -replace '"','``"')`"")) -ArgumentList ($Miners_DownloadList + $Miners_RunningPaths) -FilePath .\Scripts\Downloader.ps1
             }
         } elseif ($Miners_DownloadListPrq.Count -gt 0) {
             $Miners_DownloadMsgPrq = @($AllMiners | Where-Object {$_.PrerequisitePath -and $_.PrerequisiteMsg -and -not (Test-Path $_.PrerequisitePath)} | Select-Object -Unique PrerequisiteMsg | Foreach-Object {$_.PrerequisiteMsg})
             if ($Global:Downloader.State -ne "Running" -and $Global:DownloaderPrq.State -ne "Running") {
                 Write-Log "Starting download of $($Miners_DownloadListPrq.Count) pre-requisites."
                 if ($Session.RoundCounter -eq 0) {Write-Host "Starting downloader ($($Miners_DownloadListPrq.Count) pre-requisites) .."}
-                $Global:DownloaderPrq = Start-ThreadJob -InitializationScript ([scriptblock]::Create("Set-Location `"$((Get-Location).Path -replace '"','``"')`"")) -ArgumentList ($Miners_DownloadListPrq) -FilePath .\Scripts\Downloader.ps1
+                $Global:DownloaderPrq = Start-ThreadJob -InitializationScript ([scriptblock]::Create("Set-Location `"$((Get-Location).Path -replace '"','``"')`"")) -ArgumentList ($Miners_DownloadListPrq + $Miners_RunningPaths) -FilePath .\Scripts\Downloader.ps1
             }
         }
 
@@ -5296,21 +5306,28 @@ function Invoke-Core {
             if ($APIClients) {
                 Write-Host " "
                 Write-Host "Clients: " -NoNewLine
-                $lookup = @{}
+                #Keep the newest entry per client, forget clients not seen for 24h
+                $now = Get-UnixTimestamp
+                $lookup = [ordered]@{}
                 $dropsome = $false
-                foreach ($obj in $APIClients) {
-                    $key = "$($obj.workername)|$($obj.machinename)" 
-                    if (-not $lookup.ContainsKey($key) -or $obj.timestamp -gt $lookup[$key].timestamp) {
+                foreach ($obj in @($APIClients.ToArray())) {
+                    $key = "$($obj.workername)|$($obj.machinename)"
+                    if ($now - $obj.timestamp -gt 86400) {
+                        $dropsome = $true
+                    } elseif (-not $lookup.Contains($key)) {
                         $lookup[$key] = $obj
-                        $lastseen = [Math]::Round((Get-UnixTimestamp)-$obj.timestamp,0)
-                        Write-Host "[$($obj.workername)@$(if ($obj.machinename) {$obj.machinename} else {$obj.machineip})]" -ForegroundColor "$(if ($lastseen -gt 300) {"Red"} else {"Green"}) " -NoNewline
                     } else {
+                        if ($obj.timestamp -gt $lookup[$key].timestamp) {$lookup[$key] = $obj}
                         $dropsome = $true
                     }
                 }
                 if ($dropsome) {
                     $APIClients.Clear()
-                    $APIClients.AddRange($lookup.Values)
+                    if ($lookup.Count) {$APIClients.AddRange(@($lookup.Values))}
+                }
+                foreach ($obj in $lookup.Values) {
+                    $lastseen = [Math]::Round($now-$obj.timestamp,0)
+                    Write-Host "[$($obj.workername)@$(if ($obj.machinename) {$obj.machinename} else {$obj.machineip})]" -ForegroundColor $(if ($lastseen -gt 300) {"Red"} else {"Green"}) -NoNewline
                 }
                 $lookup = $null
                 Write-Host " "
