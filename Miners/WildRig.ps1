@@ -14,14 +14,14 @@ $ManualUri = "https://bitcointalk.org/index.php?topic=5023676.0"
 $Port = "407{0:d2}"
 $DevFee = 0.00
 $Cuda = "11.0"
-$Version = "0.51.3"
+$Version = "0.51.5"
 
 if ($IsLinux) {
     $Path = ".\Bin\GPU-WildRig\wildrig-multi"
-    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v0.51.3-wildrigmulti/wildrig-multi-linux-0.51.3.tar.gz"
+    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v0.51.5-wildrigmulti/wildrig-multi-linux-0.51.5.tar.xz"
 } else {
     $Path = ".\Bin\GPU-WildRig\wildrig.exe"
-    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v0.51.3-wildrigmulti/wildrig-multi-windows-0.51.3.zip"
+    $Uri = "https://github.com/RainbowMiner/miner-binaries/releases/download/v0.51.5-wildrigmulti/wildrig-multi-windows-0.51.5.zip"
 }
 
 $Commands = [PSCustomObject[]]@(
@@ -147,7 +147,7 @@ foreach ($Miner_Vendor in @("AMD","INTEL","NVIDIA")) {
                     #}
                 } elseif ($Miner_Vendor -eq "AMD") {
                     if ($_.AmdCapability) {
-                        $AmdCapability = $_.AmdCapability
+                        $AmdCapability = @($_.AmdCapability) -join "|"
                         $Miner_Device = $Miner_Device | Where-Object {$_.OpenCL.DeviceCapability -match $AmdCapability}
                     }
                     if ($_.ExcludeAmdCapability) {

@@ -689,6 +689,37 @@ While ($APIHttpListener.IsListening -and -not $API.Stop) {
             Remove-Variable -Name BackupAction, BackupName, BackupPath, Success, ErrMsg, Result -ErrorAction Ignore
             Break
         }
+        "/minerstatsstale" {
+            # Days=<minimum age in days, default 30>: benchmarks that cannot be used any more, with the reason
+            $StaleDays = if ("$($Parameters.Days)" -match "^\d+$") {[int]$Parameters.Days} else {30}
+            $StaleAlgos = if (Test-Path ".\Data\mineralgorithms.json") {ConvertFrom-Json "$(Get-ContentByStreamReader ".\Data\mineralgorithms.json")" -ErrorAction Ignore} else {$null}
+            $Data = ConvertTo-Json @(Get-MinerStatsStale -Days $StaleDays -Devices @($API.AllDevices | Select-Object) -AvailMiners @($Session.AvailMiners | Where-Object {$_}) -MinerAlgorithms $StaleAlgos | Select-Object) -Depth 10
+            $StaleDays = $StaleAlgos = $null
+            Remove-Variable -Name StaleDays, StaleAlgos -ErrorAction Ignore
+            Break
+        }
+        "/minerstatscleanup" {
+            # POST Names=<comma separated benchmark file names>: deletes them after a "beforecleanup" backup
+            $Success = $false
+            $ErrMsg  = ""
+            $Result  = $null
+            if ($API.LockConfig) {
+                $ErrMsg = "The configuration is locked (APIlockConfig in config.txt)"
+            } else {
+                try {
+                    $StaleNames = @("$($Parameters.Names)" -split "," | Foreach-Object {$_.Trim()} | Where-Object {$_})
+                    if (-not $StaleNames.Count) {throw "No benchmarks given"}
+                    $Result = Remove-MinerStatsStale -Names $StaleNames
+                    $Success = $true
+                } catch {
+                    $ErrMsg = "$($_.Exception.Message)"
+                }
+            }
+            $Data = ConvertTo-Json ([PSCustomObject]@{Success=$Success;Error=$ErrMsg;Result=$Result}) -Depth 10
+            $Success = $ErrMsg = $Result = $StaleNames = $null
+            Remove-Variable -Name Success, ErrMsg, Result, StaleNames -ErrorAction Ignore
+            Break
+        }
         "/config" {
             $Data = ConvertTo-Json $Session.Config -Depth 10
             Break
@@ -708,6 +739,7 @@ While ($APIHttpListener.IsListening -and -not $API.Stop) {
                             MemoryClockScale = $_.Value.MemoryClockScale
                             CoreClockBoost   = $_.Value.CoreClockBoost
                             LockVoltagePoint = $_.Value.LockVoltagePoint
+                            VoltageOffset    = $_.Value.VoltageOffset
                             LockMemoryClock  = $_.Value.LockMemoryClock
                             LockCoreClock    = $_.Value.LockCoreClock
                         }
@@ -719,6 +751,28 @@ While ($APIHttpListener.IsListening -and -not $API.Stop) {
             Break
         }
         "/debug" {
+            # one run at a time: runs share the Logs\debug-<date> folder and the
+            # Data\gpu-*.txt files, so a second run empties the first one's zip,
+            # and each run holds an API thread for minutes. A client that gave up
+            # leaves its run going, so its retry would start the second run.
+            # A run that died midway is ignored after 30 minutes.
+            $DebugNow = (Get-Date).ToUniversalTime()
+            [System.Threading.Monitor]::Enter($API.SyncRoot)
+            try {
+                $DebugSince = $API.DebugStarted
+                $DebugBusy  = $DebugSince -and $DebugSince -gt $DebugNow.AddMinutes(-30)
+                if (-not $DebugBusy) {$API.DebugStarted = $DebugNow}
+            } finally {
+                [System.Threading.Monitor]::Exit($API.SyncRoot)
+            }
+            if ($DebugBusy) {
+                $Data        = "A /debug run is still in progress (started $($DebugSince.ToString("HH:mm:ss")) UTC). Please retry when it has finished."
+                $StatusCode  = [System.Net.HttpStatusCode]::ServiceUnavailable
+                $ContentType = "text/html"
+                Remove-Variable -Name DebugBusy, DebugNow, DebugSince -ErrorAction Ignore
+                Break
+            }
+
             #create zip log and xxx out all purses
             $DebugDate     = Get-Date -Format "yyyy-MM-dd"
             $DebugPath     = Join-Path (Resolve-Path ".\Logs") "debug-$DebugDate"
@@ -816,7 +870,9 @@ While ($APIHttpListener.IsListening -and -not $API.Stop) {
                 "$($HeadText)[... $([Math]::Round(($File.Length - $HeadLength - $TailLength)/1MB,1)) MB truncated by /debug ...]`r`n$($TailText)"
             }
 
-            if (-not (Test-Path $DebugPath)) {New-Item $DebugPath -ItemType "directory" > $null}
+            # only a run that died midway leaves the folder behind - start clean
+            if (Test-Path $DebugPath) {Remove-Item $DebugPath -Recurse -Force -ErrorAction Ignore}
+            New-Item $DebugPath -ItemType "directory" > $null
             @(Get-ChildItem ".\Logs\*$(Get-Date -Format "yyyy-MM-dd")*.txt" | Select-Object) + @(Get-ChildItem ".\Logs\*$((Get-Date).AddDays(-1).ToString('yyyy-MM-dd'))*.txt" | Select-Object) | Sort-Object LastWriteTime | Foreach-Object {
                 $LastWriteTime = $_.LastWriteTime
                 $NewFile = "$DebugPath\$($_.Name)"
@@ -993,8 +1049,10 @@ While ($APIHttpListener.IsListening -and -not $API.Stop) {
 
             Remove-Item "$($DebugPath).zip" -Force -ErrorAction Ignore
 
-            $AddPurgeString = $API_Miners = $Arguments = $CurrentConfig = $CurrentPool = $DebugDate = $DebugPath = $ExeExit = $ip_mark = $ip_protect = $ip_regex = $LastWriteTime = $MaskDebugText = $NewFile = $Params = $pub_protect = $PurgeRegex = $PurgeString = $PurgeStrings = $PurgeStringsBounded = $RunningConfig = $TestFileName = $UserConfig = $null
-            Remove-Variable -Name AddPurgeString, API_Miners, Arguments, CurrentConfig, CurrentPool, DebugDate, DebugPath, ExeExit, ip_mark, ip_protect, ip_regex, LastWriteTime, MaskDebugText, NewFile, Params, pub_protect, PurgeRegex, PurgeString, PurgeStrings, PurgeStringsBounded, RunningConfig, TestFileName, UserConfig -ErrorAction Ignore
+            $API.DebugStarted = $null
+
+            $AddPurgeString = $API_Miners = $Arguments = $CurrentConfig = $CurrentPool = $DebugBusy = $DebugDate = $DebugNow = $DebugPath = $DebugSince = $ExeExit = $ip_mark = $ip_protect = $ip_regex = $LastWriteTime = $MaskDebugText = $NewFile = $Params = $pub_protect = $PurgeRegex = $PurgeString = $PurgeStrings = $PurgeStringsBounded = $RunningConfig = $TestFileName = $UserConfig = $null
+            Remove-Variable -Name AddPurgeString, API_Miners, Arguments, CurrentConfig, CurrentPool, DebugBusy, DebugDate, DebugNow, DebugPath, DebugSince, ExeExit, ip_mark, ip_protect, ip_regex, LastWriteTime, MaskDebugText, NewFile, Params, pub_protect, PurgeRegex, PurgeString, PurgeStrings, PurgeStringsBounded, RunningConfig, TestFileName, UserConfig -ErrorAction Ignore
             Break
         }
         "/setup.json" {

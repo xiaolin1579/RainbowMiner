@@ -1250,6 +1250,9 @@ public class RBMMinerStat
     public string Version { get; set; }
     public string LogFile { get; set; }
     public bool IsFL { get; set; }
+    // self-heal of a wrong stat: the last rejected sample and how many rejected samples in a row agreed with it
+    public double Failed_Value { get; set; }
+    public int Failed_Streak { get; set; }
 
     private static readonly Dictionary<string, PropertyInfo> Props = RBMStatConverter.PropertyMap(typeof(RBMMinerStat));
 
@@ -1291,6 +1294,9 @@ public class RBMPoolStat
     public double Actual24h_Week { get; set; }
     public double Estimate24h_Week { get; set; }
     public double ErrorRatio { get; set; }
+
+    // consecutive rounds whose value was more than 5x off the week average; 15 restart the stat (StatLib Set-Stat)
+    public int Deviation_Streak { get; set; }
 
     private static readonly Dictionary<string, PropertyInfo> Props = RBMStatConverter.PropertyMap(typeof(RBMPoolStat));
 

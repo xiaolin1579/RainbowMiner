@@ -1,4 +1,4 @@
-﻿param($ControllerProcessID, $WorkingDirectory, $FilePath, $ArgumentList, $LogPath, $EnvVars, $Priority, $CurrentPwd, $Comm = $null, $CPUAffinity = 0)
+﻿param($ControllerProcessID, $WorkingDirectory, $FilePath, $ArgumentList, $LogPath, $EnvVars, $Priority, $CurrentPwd, $Comm = $null, $CPUAffinity = 0, $PipeToLog = $true)
 
 $ControllerProcess = Get-Process -Id $ControllerProcessID -ErrorAction Ignore
 if ($ControllerProcess -eq $null) {return}
@@ -152,11 +152,19 @@ $EnvVars | Where-Object {$_ -match "^(\S*?)\s*=\s*(.*)$"} | Foreach-Object {
 $MiningProcess = New-Object System.Diagnostics.Process
 $MiningProcess.StartInfo = $psi
 
-# stdout/stderr are queued on the .NET event thread and drained to the log by
-# the watch loop, so a filled redirect pipe can never stall the miner.
-# A null line marks EOF on a stream (the last handle to its pipe was closed);
-# it is counted so the tail wait after the exit can be bounded
-# The handlers are plain .NET delegates (RBMOutputPump): a Register-ObjectEvent
+# stdout/stderr are queued by reader threads and drained to the log by the
+# watch loop, so a filled redirect pipe can never stall the miner.
+# EOF on a stream (the last handle to its pipe was closed) is counted so the
+# tail wait after the exit can be bounded.
+# RBMOutputPump.Start reads both streams on two dedicated background threads
+# with blocking ReadLine calls. BeginOutputReadLine/BeginErrorReadLine must not
+# be used: the redirect pipes are synchronous handles on Windows, so every
+# pending "async" read blocks a thread-pool worker for as long as the miner
+# runs - two per miner. The pool replaces starved workers only slowly, slower
+# still while the CPU is saturated, and retires them again: every HttpClient
+# call in the process then crawled or ran into its timeout (magicminer,
+# 2026-10-05: 3 miners, all 6 workers blocked, ~100 queued work items).
+# The data handlers are plain .NET delegates as well: a Register-ObjectEvent
 # -Action subscription belongs to this pooled runspace, and an event arriving
 # while it is idle makes the engine pulse it from a thread-pool thread - two
 # colliding pulses kill the whole process (InvalidPipelineStateException in
@@ -166,11 +174,15 @@ if (-not ("RBMOutputPump" -as [type])) {
     Add-Type -ErrorAction Ignore -TypeDefinition @'
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.IO;
 using System.Threading;
 
 public class RBMOutputPump {
     public readonly ConcurrentQueue<string> Queue = new ConcurrentQueue<string>();
     private int eof;
+    private volatile bool stopped;
+    private StreamReader stdout;
+    private StreamReader stderr;
     private readonly Process process;
     private readonly DataReceivedEventHandler handler;
 
@@ -186,6 +198,47 @@ public class RBMOutputPump {
 
     private void OnData(object sender, DataReceivedEventArgs e) {
         if (e.Data != null) Queue.Enqueue(e.Data); else Interlocked.Increment(ref eof);
+    }
+
+    // call after Process.Start instead of BeginOutputReadLine/BeginErrorReadLine
+    public void Start() {
+        Detach();
+        stdout = process.StandardOutput;
+        stderr = process.StandardError;
+        StartReader(stdout, "stdout");
+        StartReader(stderr, "stderr");
+    }
+
+    // after the final drain: lines are dropped from here on, and the streams
+    // are disposed, so a reader still blocked on a pipe that a foreign process
+    // keeps open ends with that process's next write instead of queueing its
+    // output unread until the process dies
+    public void Stop() {
+        stopped = true;
+        try { if (stdout != null) stdout.Dispose(); } catch { }
+        try { if (stderr != null) stderr.Dispose(); } catch { }
+    }
+
+    private void StartReader(StreamReader reader, string stream) {
+        Thread thread = new Thread(() => Read(reader), 256 * 1024);
+        thread.IsBackground = true;
+        thread.Name = "RBMOutputPump " + stream;
+        thread.Start();
+    }
+
+    // ReadLine splits at CR, LF and CRLF like the DataReceived events. The
+    // thread ends with the pipe (EOF = every write handle closed). The reader
+    // is disposed here: Process.Dispose leaves a stream open once it was
+    // accessed, so the pipe handle would otherwise wait for the finalizer
+    private void Read(StreamReader reader) {
+        try {
+            string line;
+            while ((line = reader.ReadLine()) != null) { if (!stopped) Queue.Enqueue(line); }
+        } catch {
+        } finally {
+            try { reader.Dispose(); } catch { }
+        }
+        Interlocked.Increment(ref eof);
     }
 
     public void Detach() {
@@ -254,9 +307,15 @@ if ($JobHandle -ne [IntPtr]::Zero) {
 # the cleanup lives in a finally: if the pipeline is stopped from the outside
 # (PowerShell.Stop() on a pooled runspace), the event subscriptions and a
 # still-running miner must not leak into a runspace that gets reused
+# a type compiled by an older script version in this process has no Start
+$AsyncReads = -not ($OutputPump -and $OutputPump.GetType().GetMethod("Start"))
 try {
-    $MiningProcess.BeginOutputReadLine()
-    $MiningProcess.BeginErrorReadLine()
+    if ($AsyncReads) {
+        $MiningProcess.BeginOutputReadLine()
+        $MiningProcess.BeginErrorReadLine()
+    } else {
+        $OutputPump.Start()
+    }
 
     # Set-SubProcessPriority in ProcLib re-applies this to all discovered PIDs
     try {$MiningProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]$PriorityClass} catch {}
@@ -269,6 +328,11 @@ try {
     # At most MaxLines per call: the pump enqueues at native speed, and a miner
     # that floods faster than this loop dequeues would otherwise keep it from
     # ever returning to the watch loop (exit detection, kill on controller exit)
+    # PipeToLog = false: the miner writes the log file itself (LogFileArgs in
+    # MinerAPIs.psm1) - the pipe is still drained so the miner never blocks on
+    # a full pipe, but nothing from it reaches the file
+    $PipeLogPath = if ($PipeToLog) {$LogPath} else {""}
+
     $DrainToLog = {
         param($Queue, $Path, $MaxLines = 10000)
         $line  = $null
@@ -301,7 +365,7 @@ try {
 
     do {
         $Done = $ControllerProcess.WaitForExit(1000)
-        try {& $DrainToLog $OutputQueue $LogPath} catch {}
+        try {& $DrainToLog $OutputQueue $PipeLogPath} catch {}
         if ($Done -and -not $MiningProcess.HasExited) {
             try {$MiningProcess.Kill()} catch {}
         }
@@ -337,7 +401,7 @@ try {
     # empty, time-bounded in case a foreign holder of the pipe keeps writing
     $sw.Restart()
     do {
-        try {& $DrainToLog $OutputQueue $LogPath} catch {}
+        try {& $DrainToLog $OutputQueue $PipeLogPath} catch {}
     } while (-not $OutputQueue.IsEmpty -and $sw.Elapsed.TotalSeconds -lt 5)
 } finally {
     try {if (-not $MiningProcess.HasExited) {$MiningProcess.Kill()}} catch {}
@@ -349,9 +413,15 @@ try {
         $Comm["ExitTime"] = Get-Date
         try {if ($MiningProcess.HasExited) {$Comm["ExitCode"] = $MiningProcess.ExitCode}} catch {}
     }
-    try {$MiningProcess.CancelOutputRead()} catch {}
-    try {$MiningProcess.CancelErrorRead()} catch {}
-    if ($OutputPump) {$OutputPump.Detach()}
+    if ($AsyncReads) {
+        try {$MiningProcess.CancelOutputRead()} catch {}
+        try {$MiningProcess.CancelErrorRead()} catch {}
+    }
+    if ($OutputPump) {
+        $OutputPump.Detach()
+        if (-not $AsyncReads) {$OutputPump.Stop()}
+        $OutputPump = $null
+    }
     # the fallback -Action subscriptions are PSEventJobs: without Remove-Job
     # they pile up in the reused pooled runspace's job table (2 per miner start)
     foreach ($Event_Job in @($OutEvent, $ErrEvent)) {

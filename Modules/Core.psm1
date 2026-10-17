@@ -103,6 +103,19 @@ function Start-Core {
             }
         }
 
+        # floor for the .NET thread pool: HttpClient needs free workers for
+        # connect, TLS and response parsing, and the pool adds workers only
+        # slowly - slower still while the CPU is saturated (CPU mining on a
+        # small CPU). A blocking user of pool threads (the miner output readers
+        # did that until 2026-10-05, two per miner) then stalls every web
+        # request in the process until its timeout
+        try {
+            [int]$MinWorkerThreads = 0
+            [int]$MinIOThreads = 0
+            [System.Threading.ThreadPool]::GetMinThreads([ref]$MinWorkerThreads, [ref]$MinIOThreads)
+            if ($MinWorkerThreads -lt 16) {[void][System.Threading.ThreadPool]::SetMinThreads(16, $MinIOThreads)}
+        } catch {}
+
         $Session.ConfigName = [IO.Path]::GetFileNameWithoutExtension($ConfigFile)
 
         #Setup console and display logo
@@ -2492,6 +2505,10 @@ function Invoke-Core {
         $MinerInfoChanged = $true
     }
     if ($MinerInfoChanged) {Set-ContentJson -PathToFile ".\Data\minerinfo.json" -Data $Global:MinerInfo -Compress > $null}
+    # algorithms per module for the stats cleanup (Data\mineralgorithms.json): read
+    # once per start and whenever the module set changed, a changed module file
+    # is read again
+    if ($Session.RoundCounter -eq 0 -or $MinerInfoChanged) {try {Update-MinerAlgorithmsInfo > $null} catch {if ($Error.Count){$Error.RemoveAt(0)}}}
 
     #Check for GPU failure and reboot, if needed
     if ($Session.Config.RebootOnGPUFailure) { 
@@ -4336,6 +4353,7 @@ function Invoke-Core {
                     BaseName             = $Miner.BaseName
                     Path                 = $Miner.Path
                     Arguments            = $Miner.Arguments
+                    LogFileArgs          = $Miner.LogFileArgs
                     API                  = $Miner.API
                     Port                 = $Miner.Port
                     Algorithm            = $Miner.HashRates.PSObject.Properties.Name
@@ -6390,6 +6408,16 @@ function Set-MinerStats {
         if (($Miner.Status -eq [Minerstatus]::Running) -or $Miner.New) { #GetStatus() check?
             $Miner_PowerDraw = $Miner.GetPowerDraw()
 
+            # stall detection: a GPU miner whose cards sit at idle power while it still reports a hashrate is dead
+            # (seen with ccminer forks). Judged by sensor readings only, so rigs without measured power are skipped
+            $Miner_PowerState = $null
+            $Miner_PowerIdle  = $false
+            $Miner_Stalled    = $false
+            if ($Session.Config.EnableStallDetection -and $Miner.Status -eq [MinerStatus]::Running -and $Miner.DeviceName -notlike "CPU*") {
+                $Miner_PowerState = Get-DevicePowerState -DeviceName $Miner.DeviceName
+                $Miner_PowerIdle  = [bool]$Miner_PowerState.IsIdle
+            }
+
             $Statset = 0
             $Miner_Index = 0
             $Miner_Failed= $false
@@ -6400,10 +6428,20 @@ function Set-MinerStats {
 
                 $Miner.Speed_Live[$Miner_Index] = [Double]$Miner_Speed
 
+                if ($Miner_Index -eq 0) {
+                    if ($Miner_PowerIdle -and $Miner_Speed -gt 0) {$Miner.PowerIdleRounds++} else {$Miner_PowerIdle = $false;$Miner.PowerIdleRounds = 0}
+                    if ($Miner.PowerIdleRounds -ge 3) {$Miner_Stalled = $true}
+                }
+
                 Write-Log "$($Miner.BaseName) $(if ($Miner_Benchmarking) {"benchmarking"} else {"mining"}) $($Miner_Algorithm) on $($Miner.DeviceModel): $($Miner.GetMinerDataCount()) samples / round $(if ($Miner_Benchmarking) {"$($Miner.Benchmarked) / variance $("{0:f2}" -f ($Miner.Variance[$Miner.Algorithm.IndexOf($Miner_Algorithm)]*100))%"} else {$Miner.Rounds})"
 
                 $Stat = $null
-                if ($Miner_Speed -or -not $Miner_Benchmarking -or $Miner.CrashCount -ge $Session.Config.MaxCrashesDuringBenchmark) {
+                if ($Miner_PowerIdle -and $Miner_Speed) {
+                    # idle GPUs cannot produce the reported hashrate: keep the sample out of the stats. Once the
+                    # benchmark has used up its crashes, the round counts as a failed benchmark (zero hashrate)
+                    if ($Miner_Benchmarking -and $Miner.CrashCount -ge $Session.Config.MaxCrashesDuringBenchmark) {$Miner_Speed = 0;$Miner.Speed_Live[$Miner_Index] = 0}
+                }
+                if ((-not $Miner_PowerIdle -or -not $Miner_Speed) -and ($Miner_Speed -or -not $Miner_Benchmarking -or $Miner.CrashCount -ge $Session.Config.MaxCrashesDuringBenchmark)) {
                     $Stat = Set-Stat -Name "$($Miner.Name)_$($Miner_Algorithm -replace '\-.*$')_HashRate" -Value $Miner_Speed -Difficulty $Miner_Diff -Ratio $Miner.RejectedShareRatio[$Miner_Index] -Duration $StatSpan -FaultDetection $true -FaultTolerance $Miner.FaultTolerance -PowerDraw $Miner_PowerDraw -Sub $Global:DeviceCache.DevicesToVendors[$Miner.DeviceModel] -StartTime $Miner.StartTime -Version "$(Get-MinerVersion $Miner.Version)" -LogFile "$(Split-Path -Leaf $Miner.LogFile)" -Quiet:$($Quiet -or ($Miner.GetRunningTime() -lt (New-TimeSpan -Seconds 30)) -or $Miner.IsWrapper())
                     $Statset++
                 }
@@ -6438,8 +6476,14 @@ function Set-MinerStats {
 
             $Miner.EndOfRoundCleanup()
 
-            Write-ActivityLog $Miner -Crashed $(if ($Miner_Failed) {2} else {0})
-            if ($Miner_Failed) {
+            Write-ActivityLog $Miner -Crashed $(if ($Miner_Stalled) {1} elseif ($Miner_Failed) {2} else {0})
+            if ($Miner_Stalled) {
+                Write-Log -Level Warn "Miner $($Miner.Name) mining $($Miner.Algorithm -join '/') on pool $($Miner.Pool -join '/') stalled: the GPUs draw $([Math]::Round($Miner_PowerState.PowerDraw))W of $([Math]::Round($Miner_PowerState.Reference))W since $($Miner.PowerIdleRounds) rounds while a hashrate is reported - treated as crashed. "
+                $Miner.CrashCount++
+                $Miner.PowerIdleRounds = 0
+                $Miner.SetStatus([MinerStatus]::Idle)
+                $Miner_Failed_Total++
+            } elseif ($Miner_Failed) {
                 $Miner.SetStatus([MinerStatus]::Failed)
                 $Miner.Stopped = $true
                 Write-Log -Level Warn "Miner $($Miner.Name) mining $($Miner.Algorithm -join '/') on pool $($Miner.Pool -join '/') temporarily disabled. "

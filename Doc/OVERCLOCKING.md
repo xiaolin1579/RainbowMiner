@@ -349,13 +349,16 @@ LockCoreClock/LockMemoryClock take the same numbers on both systems.
 Since Turing, most miners lock the core clock instead of using an offset: a locked core plus a
 positive CoreClockBoost runs the card at a lower voltage (an undervolt), and memory locked at
 810 MHz, its lowest state, saves a lot of power on algorithms that do not need memory speed.
-The presets do not use locks, because they have side effects:
+The presets do not use locks, because they do not work everywhere:
 
-- on Windows, RainbowMiner can only set locks when it runs as administrator
-- a lock stays in place until something unlocks it. `"*"` leaves a lock untouched, so once one
-  profile of a card sets a lock, **all other profiles of that card must set LockCoreClock and
-  LockMemoryClock to "0"** - otherwise the next algorithm runs with the old lock
+- on Windows, RainbowMiner can only set and release locks when it runs as administrator
 - Pascal (GTX10xx, P10x) does not support locks on most drivers
+
+A lock does not outlive its miner: when a miner stops, RainbowMiner releases the locks its
+profile has set (with `EnableOCFullReset` = 1, the default, it resets all clock settings of
+the card). The next algorithm starts from stock clocks, so the other profiles of that card can
+leave LockCoreClock and LockMemoryClock at `"*"`. Only when RainbowMiner is killed while a
+miner runs, the lock stays on the card until the next miner stops.
 
 If you want them, these are good starting points (LockCoreClock / LockMemoryClock in MHz,
 "-" means leave it "*" and use the offset preset):
@@ -371,6 +374,11 @@ If you want them, these are good starting points (LockCoreClock / LockMemoryCloc
 - For more efficiency on Ampere, use 1305 instead of 1400 for Profile4.
 - NexaPow uses Profile2, but prefers memory locked at 5000 instead of an offset.
 - Autolykos2 with memory locked at 5000 loses about 13% hashrate for about 20% less power.
+- PearlHash does not need memory speed: WildRig, SRBMiner and OneZeroMiner all recommend memory
+  locked at 810 on Ampere and newer. OneZeroMiner then picks its compact kernel by itself (about
+  the same hashrate, 10-20% better efficiency), because RainbowMiner sets the lock before the
+  miner starts. Give PearlHash its own profile in algorithms.config.txt, e.g. a copy of Profile2
+  with MemoryClockBoost "0" and LockMemoryClock "810".
 
 ## The Nvidia P2 state
 
@@ -450,3 +458,83 @@ passed to NVML with the same number as to nvidia-settings.
 One trap on a client rig: `EnableLinuxHeadless` is an ordinary config value, so a server
 config can overwrite it. If overclocking stops working right after a config sync, check
 whether the setting is still there and add it to `ExcludeServerConfigVars` if needed.
+
+## AMD overclocking on Linux
+
+RainbowMiner can apply the overclocking profiles to AMD GPUs on Linux through the amdgpu
+OverDrive interface in sysfs, without CoreCtrl, LACT or a PowerPlay table. It is off by
+default; switch it on with `"EnableOCLinuxAmd": "1"` next to `"EnableOCProfiles": "1"`
+(setup: `[C]onfiguration->[C]ommon`, or the web setup). Two things have to be in place:
+
+- the ocdaemon must be running (`ocdaemon status`, otherwise run `./install.sh` again), all
+  writes go through it as root
+- OverDrive must be enabled in the driver with the kernel parameter
+  `amdgpu.ppfeaturemask=0xffffffff` (e.g. appended to `GRUB_CMDLINE_LINUX_DEFAULT` in
+  /etc/default/grub, then `sudo update-grub` and a reboot). Without it the driver does not
+  create `pp_od_clk_voltage` and only the power limit can be changed
+
+The profile fields map to the OverDrive controls as follows:
+
+| Field              | AMD on Linux                                                                   |
+| ------------------ | ------------------------------------------------------------------------------ |
+| `PowerLimit`       | power cap in percent of the card's default, clamped to the driver's min/max    |
+| `LockCoreClock`    | maximum core clock in MHz (Vega20, RDNA1, RDNA2, RDNA3)                        |
+| `CoreClockBoost`   | core clock offset in MHz (RDNA4 only, these cards take no maximum)             |
+| `LockMemoryClock`  | maximum memory clock in MHz (the memory controller clock the driver shows, not the effective data rate) |
+| `VoltageOffset`    | GFX voltage offset in mV, negative values undervolt (RDNA2 and newer, needs `"EnableOCVoltage": "1"`) |
+| `MemoryClockBoost`, `ThermalLimit`, `LockVoltagePoint` | not available on AMD, a warning is logged  |
+
+Polaris and Vega10 cards (RX 400/500, Vega 56/64) use a per-state OverDrive table that
+RainbowMiner does not touch: only the power limit applies there. RDNA2 cards print no range for
+the voltage offset and the driver does not check it, so RainbowMiner limits it to -200..0 mV on
+those cards; RDNA3 and RDNA4 report a range and it is enforced. Everything else is checked
+against the ranges the driver reports, and the result is read back after every change.
+
+The first change records the card's current clocks, voltage offset, power cap and performance
+level in `/run/rainbowminer/amd-oc/<bus>.state`. Every later profile puts back the fields it
+does not set, so a switch from a core-heavy to a memory-heavy algorithm never keeps the old core
+clock, and a miner stop, the OC reset and the exit of RainbowMiner restore the recorded values.
+The state lives in /run and is gone after a reboot, which resets the driver as well.
+
+A refused or unsupported setting is reported in the log and leaves the card as it was, e.g.:
+
+    OC RX6600-...: ERROR: AMD OC 03:00: the voltage offset -300 is outside the allowed range -200..0
+    OC RX580-...: AMD OC 05:00: the core clock is not supported on this GPU (per-state OverDrive table)
+    OC RX7600-...: AMD OC 04:00: the core clock is not supported: OverDrive is not enabled, boot with amdgpu.ppfeaturemask=0xffffffff
+
+To see what the driver offers for a card and what RainbowMiner has recorded, run as root:
+
+    bash IncludesLinux/bash/amd_oc.sh --bus 03:00 --query
+
+## AMD overclocking on Windows
+
+On Windows, AMD GPUs are overclocked through MSI Afterburner, like NVIDIA cards. As an
+alternative, `"EnableOCWindowsAmd": "1"` (with `"EnableOCProfiles": "1"`) applies the profiles
+through the AMD driver itself with the helper `Includes\amdoc\amdoc.exe`, which uses AMD's
+ADLX interface. Nothing else has to be installed: the Adrenalin driver 22.x or newer brings
+the ADLX library, and MSI Afterburner is not needed for AMD cards then. amdoc.exe is a
+separate program with its own license, see `Includes\amdoc\LICENSE.txt`.
+
+The profile fields map to the Adrenalin tuning controls as follows:
+
+| Field              | AMD on Windows                                                                |
+| ------------------ | ----------------------------------------------------------------------------- |
+| `PowerLimit`       | power limit in percent of the default, within the driver's range (e.g. 80 = -20%) |
+| `LockCoreClock`    | maximum core clock in MHz, within the driver's range                          |
+| `LockMemoryClock`  | maximum memory clock in MHz, on the scale Adrenalin shows it                  |
+| `VoltageOffset`    | GFX voltage in mV, negative values undervolt: added to the card's default voltage on RDNA2/RDNA3, an offset on RDNA4 (needs `"EnableOCVoltage": "1"`) |
+| `CoreClockBoost`, `MemoryClockBoost`, `ThermalLimit`, `LockVoltagePoint` | not available, a warning is logged |
+
+Cards older than RDNA get the power limit only. The baseline of every card is recorded in
+`%LOCALAPPDATA%\RainbowMiner\amdoc\<bus>.state` before the first change and the same
+restore rules as on Linux apply. Note that the Adrenalin software keeps tuning values across
+restarts, so a card that was left overclocked by a crash is put back by the next miner start,
+stop or OC reset, or by hand with `amdoc.exe --bus <bus> --reset`.
+
+To see the cards ADLX reports and what the driver offers for one of them:
+
+    Includes\amdoc\amdoc.exe --list
+    Includes\amdoc\amdoc.exe --bus 03:00 --query
+
+This path is new and was written without AMD hardware at hand: please report the `--query`
+output and the log lines of the first runs, good or bad.

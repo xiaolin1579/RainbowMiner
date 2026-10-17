@@ -70,6 +70,7 @@ The following documents are the source of truth and are kept up to date with eve
 | [Doc/REPORTAPI.md](Doc/REPORTAPI.md)                             | the status report a rig sends to the central monitoring, for your own monitoring        |
 | [Doc/LINUX-PREREQUISITES.md](Doc/LINUX-PREREQUISITES.md)         | GPU driver, OpenCL and huge pages on a Linux rig                                        |
 | [Doc/LINUX-SETUP-SHORTGUIDE.md](Doc/LINUX-SETUP-SHORTGUIDE.md)   | short guide to running RainbowMiner on Linux with Nvidia GPUs                          |
+| [Doc/DOCKER.md](Doc/DOCKER.md)                                   | run RainbowMiner in a Docker container: Dockerfiles for AMD, NVIDIA, both, Intel or CPU only, clean stop |
 
 The rest of this README covers the pre-requisites, the installation, the day-to-day
 operation and the remaining configuration files.
@@ -501,6 +502,8 @@ which devices, and how RainbowMiner reads its hashrate.
 - a miner/algorithm that crashes repeatedly is put on hold by the watchdog, and disabled
   permanently, if **EnableAutoDisableMiners** is set. Both can be released again on the
   **Miners** page of the web interface
+- a GPU miner that keeps reporting a hashrate while its GPUs sit at idle power is stopped
+  and counted as crashed (**EnableStallDetection**, needs measured GPU power readings)
 - the miner Excavator mines on NiceHash pool, only
 - miners Excavator & Excavator1.4.4 run in their own miner window, even if you select to hide
   miner windows
@@ -549,6 +552,14 @@ the web interface:
   benchmarks are saved as a "before restore" backup first, so a restore can always be undone.
   RainbowMiner uses the restored benchmarks from the next round on, no restart needed
 - restore and delete are blocked, while "APIlockConfig" is set to 1 in config.txt
+- **Clean up stale benchmarks** lists the benchmarks that cannot be used any more and that
+  have not been updated for the given number of days (default 30): a device the system does
+  not detect, a miner whose module is gone, an algorithm the miner module does not list any
+  more, or a device set that is not a group of the installed cards (e.g. the sets of the
+  remaining cards while one had dropped out). Benchmarks of miners or algorithms that are
+  merely not offered by the pools right now, or excluded for a test, stay. Tick the reasons
+  to list, check the table and delete them. The current benchmarks are saved as a "before
+  cleanup" backup first
 - **Download a zip** at the bottom of the page fetches a zip of one or all miners, e.g. to copy
   the benchmarks to a rig with the same cards
 

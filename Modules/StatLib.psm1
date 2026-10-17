@@ -5,6 +5,10 @@
 $Script:StatFluctuationFields = @("Minute_Fluctuation","Minute_5_Fluctuation","Minute_10_Fluctuation","Hour_Fluctuation","Day_Fluctuation","ThreeDay_Fluctuation","Week_Fluctuation")
 $Script:StatDirsChecked = @{}
 $Script:Utf8NoBomEncoding = [System.Text.UTF8Encoding]::new($false)
+# state of the last Get-Stat -Miners pass: the folder's write time (NTFS and
+# ext4 bump it on every file add/remove, not on a rewrite) and the present
+# device names - unchanged means the cache already mirrors the folder
+$Script:MinerStatsStamp = $null
 
 function Test-StatDir {
     param(
@@ -91,8 +95,6 @@ function Set-Stat {
 
     if (-not $Reset -and ($Stat = Get-StatFromFile -Path $Path -Name $Name -Cached:$Cached -Check $Check)) {
         try {
-            if ($Mode -in @("Pools","Profit") -and $Stat.Week_Fluctuation -and [Double]$Stat.Week_Fluctuation -ge 0.8) {throw "Fluctuation out of range ($Name)"}
-
             if ($Mode -eq "Miners") {
                 $Benchmarked = if ($Stat.Benchmarked -ne $null) {$Stat.Benchmarked} else {[DateTime]$Stat.Updated - [TimeSpan]$Stat.Duration}
             }
@@ -129,6 +131,8 @@ function Set-Stat {
                         Version            = $Version
                         LogFile            = $LogFile
                         IsFL               = [Bool]$Stat.IsFL
+                        Failed_Value       = [Double]$Stat.Failed_Value
+                        Failed_Streak      = [Int]$Stat.Failed_Streak
                         #Ratio_Average      = [Double]$Stat.Ratio_Average
                     }
                     Break
@@ -164,6 +168,7 @@ function Set-Stat {
                         Actual24h_Week     = [Double]$Stat.Actual24h_Week
                         Estimate24h_Week   = [Double]$Stat.Estimate24h_Week
                         ErrorRatio         = [Double]$Stat.ErrorRatio
+                        Deviation_Streak   = [Int]$Stat.Deviation_Streak
                     }
                     Break
                 }
@@ -187,12 +192,26 @@ function Set-Stat {
                         Duration = [TimeSpan]$Stat.Duration
                         Updated = [DateTime]$Stat.Updated
                         Failed = [Int]$Stat.Failed
+                        Failed_Value = [Double]$Stat.Failed_Value
+                        Failed_Streak = [Int]$Stat.Failed_Streak
+                        Deviation_Streak = [Int]$Stat.Deviation_Streak
 
                         # Profit Part
                         PowerDraw_Live     = [Double]$Stat.PowerDraw_Live
                         PowerDraw_Average  = [Double]$Stat.PowerDraw_Average
                     }
                 }
+            }
+
+            # a history that fluctuates this much is worthless and restarts - but only once the stat is old enough to have one:
+            # a young stat has nothing to protect and would only reset again and again while it is at its most volatile
+            if ($Mode -in @("Pools","Profit")) {
+                # two reasons to throw a history away: it fluctuates too much (only once the stat is an hour old, a young stat
+                # has nothing to protect and would reset again and again), or the values stayed off the long average by more
+                # than 5x for 15 rounds in a row (a wrong coin quote arrived or got fixed, a new price level), which a capped
+                # fluctuation of an old stat would need weeks to notice
+                if ([Double]$Stat.Week_Fluctuation -ge 0.8 -and $Stat.Duration -ge [TimeSpan]::FromHours(1)) {throw "Fluctuation out of range ($Name)"}
+                if ([Int]$Stat.Deviation_Streak -ge 15) {throw "Deviation out of range ($Name)"}
             }
 
             if ($ResetIfZero -and -not $Stat.Live) {throw}
@@ -218,11 +237,30 @@ function Set-Stat {
         
             if ($Value -gt 0 -and $ToleranceMax -eq 0) {$ToleranceMax = $Value}
 
-            if ($Value -lt $ToleranceMin -or $Value -gt $ToleranceMax) {
-                $StatResetValue = $null
+            $StatRejected   = ($Value -lt $ToleranceMin -or $Value -gt $ToleranceMax)
+            $StatKeepStreak = $false
+
+            if ($StatRejected -and $mode -eq "Profit" -and $UplimProtection -gt 1.0 -and $Value -gt 0) {
+                # spike protection self-heal: a single spike stays out, but a level that holds for three rounds in a row is real
+                # (a better miner was benchmarked, the pools came back). The value is then accepted without a reset, so the stat
+                # keeps its age for the MiningRigRentals price reference. The streak survives the acceptance, so the following
+                # rounds at the new level pass at once while the averages catch up
+                $StatRejectMatch    = $Stat.Failed_Value -gt 0 -and [Math]::Abs($Value / $Stat.Failed_Value - 1) -le 0.5
+                $Stat.Failed_Streak = if ($StatRejectMatch) {$Stat.Failed_Streak + 1} else {1}
+                $Stat.Failed_Value  = $Value
+                if ($Stat.Failed_Streak -ge 3) {
+                    if (-not $Quiet) {Write-Log -Level $LogLevel "Stat file ($Name) accepts the value $($Value.ToString()), it held for $($Stat.Failed_Streak) rounds above the spike protection. "}
+                    $StatRejected   = $false
+                    $StatKeepStreak = $true
+                }
+            }
+
+            if ($StatRejected) {
+                $StatResetValue  = $null
+                $StatResetStreak = $null
 
                 $Stat.Failed += 10
-                
+
                 if ($Stat.Failed -ge 30) {
                     $Stat.Failed = 30
 
@@ -233,9 +271,35 @@ function Set-Stat {
                     }
                 }
 
+                if ($Stat -and $mode -eq "Miners" -and $Value -gt 0) {
+                    # self-heal: a stat can be wrong by orders of magnitude (a miner api that reported garbage while the benchmark ran)
+                    # or stale after a lasting change (a card dropped out of the set), every real sample then stays outside the
+                    # tolerance for good. Three rejected samples in a row that agree with each other restart the stat from the current
+                    # sample. A single off sample, a zero (miner api not answering) or samples that disagree cannot do that
+                    $StatRejectMatch = $false
+                    if ($Stat.Failed_Value -gt 0) {
+                        if ($FaultTolerance -lt 1) {
+                            $StatRejectMatch = [Math]::Abs($Value / $Stat.Failed_Value - 1) -le [Math]::Min(2 * [Math]::Max($FaultTolerance, 0.1), 0.5)
+                        } else {
+                            $StatRejectFactor = [Math]::Max($FaultTolerance, 2)
+                            $StatRejectMatch  = ($Value -ge $Stat.Failed_Value / $StatRejectFactor) -and ($Value -le $Stat.Failed_Value * $StatRejectFactor)
+                        }
+                    }
+                    $Stat.Failed_Streak = if ($StatRejectMatch) {$Stat.Failed_Streak + 1} else {1}
+                    $Stat.Failed_Value  = $Value
+                    if ($Stat.Failed_Streak -ge 3) {
+                        $StatResetValue  = $Stat.Week
+                        $StatResetStreak = $Stat.Failed_Streak
+                        $IsFastlaneValue = $false
+                        $Stat = $null
+                    }
+                }
+
                 if (-not $Quiet) {
                     if ($mode -eq "Miners") {
-                        if ($StatResetValue -ne $null) {
+                        if ($StatResetStreak) {
+                            Write-Log -Level $LogLevel "Stat file ($Name) will be reset, because the stored value $($StatResetValue | ConvertTo-Hash) is too far off of the last $($StatResetStreak) measured values (now $($Value | ConvertTo-Hash)). "
+                        } elseif ($StatResetValue -ne $null) {
                             Write-Log -Level $LogLevel "Stat file ($Name) will be reset, because the seeded value $($StatResetValue | ConvertTo-Hash) (fastlane or derived from another device set) is too far off of $($Value | ConvertTo-Hash). "
                         } else {
                             Write-Log -Level $LogLevel "Stat file ($Name) was not updated because the value $($Value | ConvertTo-Hash) is outside fault tolerance $($ToleranceMin | ConvertTo-Hash) to $($ToleranceMax | ConvertTo-Hash). "
@@ -246,6 +310,14 @@ function Set-Stat {
                 }
 
             } else {
+                # consecutive rounds whose value is more than 5x above or below the long average (pool and profit stats only,
+                # zero values do not count): 15 of them restart the stat at the next load, see the throw above
+                $StatDeviationStreak = 0
+                if ($Mode -ne "Miners" -and $Value -gt 0 -and $Stat.Week -gt 0) {
+                    $StatRatio = $Value / $Stat.Week
+                    if ($StatRatio -gt 5 -or $StatRatio -lt 0.2) {$StatDeviationStreak = [Int]$Stat.Deviation_Streak + 1}
+                }
+
                 $Span_Minute = [Math]::Min($Duration.TotalMinutes / [Math]::Min($Stat.Duration.TotalMinutes, 1), 1)
                 $Span_Minute_5 = [Math]::Min(($Duration.TotalMinutes / 5) / [Math]::Min(($Stat.Duration.TotalMinutes / 5), 1), 1)
                 $Span_Minute_10 = [Math]::Min(($Duration.TotalMinutes / 10) / [Math]::Min(($Stat.Duration.TotalMinutes / 10), 1), 1)
@@ -259,19 +331,19 @@ function Set-Stat {
                         [RBMMinerStat]@{
                             Live = $Value
                             Minute = $Stat.Minute + $Span_Minute * ($Value - $Stat.Minute)
-                            Minute_Fluctuation = $Stat.Minute_Fluctuation + $Span_Minute * ([Math]::Abs($Value - $Stat.Minute) / [Math]::Max([Math]::Abs($Stat.Minute), $SmallestValue) - $Stat.Minute_Fluctuation)
+                            Minute_Fluctuation = $Stat.Minute_Fluctuation + $Span_Minute * ([Math]::Min([Math]::Abs($Value - $Stat.Minute) / [Math]::Max([Math]::Abs($Stat.Minute), $SmallestValue), 1) - $Stat.Minute_Fluctuation)
                             Minute_5 = $Stat.Minute_5 + $Span_Minute_5 * ($Value - $Stat.Minute_5)
-                            Minute_5_Fluctuation = $Stat.Minute_5_Fluctuation + $Span_Minute_5 * ([Math]::Abs($Value - $Stat.Minute_5) / [Math]::Max([Math]::Abs($Stat.Minute_5), $SmallestValue) - $Stat.Minute_5_Fluctuation)
+                            Minute_5_Fluctuation = $Stat.Minute_5_Fluctuation + $Span_Minute_5 * ([Math]::Min([Math]::Abs($Value - $Stat.Minute_5) / [Math]::Max([Math]::Abs($Stat.Minute_5), $SmallestValue), 1) - $Stat.Minute_5_Fluctuation)
                             Minute_10 = $Stat.Minute_10 + $Span_Minute_10 * ($Value - $Stat.Minute_10)
-                            Minute_10_Fluctuation = $Stat.Minute_10_Fluctuation + $Span_Minute_10 * ([Math]::Abs($Value - $Stat.Minute_10) / [Math]::Max([Math]::Abs($Stat.Minute_10), $SmallestValue) - $Stat.Minute_10_Fluctuation)
+                            Minute_10_Fluctuation = $Stat.Minute_10_Fluctuation + $Span_Minute_10 * ([Math]::Min([Math]::Abs($Value - $Stat.Minute_10) / [Math]::Max([Math]::Abs($Stat.Minute_10), $SmallestValue), 1) - $Stat.Minute_10_Fluctuation)
                             Hour = $Stat.Hour + $Span_Hour * ($Value - $Stat.Hour)
-                            Hour_Fluctuation = $Stat.Hour_Fluctuation + $Span_Hour * ([Math]::Abs($Value - $Stat.Hour) / [Math]::Max([Math]::Abs($Stat.Hour), $SmallestValue) - $Stat.Hour_Fluctuation)
+                            Hour_Fluctuation = $Stat.Hour_Fluctuation + $Span_Hour * ([Math]::Min([Math]::Abs($Value - $Stat.Hour) / [Math]::Max([Math]::Abs($Stat.Hour), $SmallestValue), 1) - $Stat.Hour_Fluctuation)
                             Day = $Stat.Day + $Span_Day * ($Value - $Stat.Day)
-                            Day_Fluctuation = $Stat.Day_Fluctuation + $Span_Day * ([Math]::Abs($Value - $Stat.Day) / [Math]::Max([Math]::Abs($Stat.Day), $SmallestValue) - $Stat.Day_Fluctuation)
+                            Day_Fluctuation = $Stat.Day_Fluctuation + $Span_Day * ([Math]::Min([Math]::Abs($Value - $Stat.Day) / [Math]::Max([Math]::Abs($Stat.Day), $SmallestValue), 1) - $Stat.Day_Fluctuation)
                             ThreeDay = $Stat.ThreeDay + $Span_ThreeDay * ($Value - $Stat.ThreeDay)
-                            ThreeDay_Fluctuation = $Stat.ThreeDay_Fluctuation + $Span_ThreeDay * ([Math]::Abs($Value - $Stat.ThreeDay) / [Math]::Max([Math]::Abs($Stat.ThreeDay), $SmallestValue) - $Stat.ThreeDay_Fluctuation)
+                            ThreeDay_Fluctuation = $Stat.ThreeDay_Fluctuation + $Span_ThreeDay * ([Math]::Min([Math]::Abs($Value - $Stat.ThreeDay) / [Math]::Max([Math]::Abs($Stat.ThreeDay), $SmallestValue), 1) - $Stat.ThreeDay_Fluctuation)
                             Week = $Stat.Week + $Span_Week * ($Value - $Stat.Week)
-                            Week_Fluctuation = $Stat.Week_Fluctuation + $Span_Week * ([Math]::Abs($Value - $Stat.Week) / [Math]::Max([Math]::Abs($Stat.Week), $SmallestValue) - $Stat.Week_Fluctuation)
+                            Week_Fluctuation = $Stat.Week_Fluctuation + $Span_Week * ([Math]::Min([Math]::Abs($Value - $Stat.Week) / [Math]::Max([Math]::Abs($Stat.Week), $SmallestValue), 1) - $Stat.Week_Fluctuation)
                             Duration = $Stat.Duration + $Duration
                             Updated = $Updated
                             Failed = [Math]::Max($Stat.Failed-1,0)
@@ -286,6 +358,8 @@ function Set-Stat {
                             Version            = $Version
                             LogFile            = $LogFile
                             IsFL               = $false
+                            Failed_Value       = 0
+                            Failed_Streak      = 0
                             #Ratio_Average      = if ($Stat.Ratio_Average -gt 0) {[Math]::Round($Stat.Ratio_Average - $Span_Hour * ($Ratio - $Stat.Ratio_Average),4)} else {$Ratio}
                         }
                         Break
@@ -294,19 +368,19 @@ function Set-Stat {
                         [RBMPoolStat]@{
                             Live = $Value
                             Minute = $Stat.Minute + $Span_Minute * ($Value - $Stat.Minute)
-                            Minute_Fluctuation = $Stat.Minute_Fluctuation + $Span_Minute * ([Math]::Abs($Value - $Stat.Minute) / [Math]::Max([Math]::Abs($Stat.Minute), $SmallestValue) - $Stat.Minute_Fluctuation)
+                            Minute_Fluctuation = $Stat.Minute_Fluctuation + $Span_Minute * ([Math]::Min([Math]::Abs($Value - $Stat.Minute) / [Math]::Max([Math]::Abs($Stat.Minute), $SmallestValue), 1) - $Stat.Minute_Fluctuation)
                             Minute_5 = $Stat.Minute_5 + $Span_Minute_5 * ($Value - $Stat.Minute_5)
-                            Minute_5_Fluctuation = $Stat.Minute_5_Fluctuation + $Span_Minute_5 * ([Math]::Abs($Value - $Stat.Minute_5) / [Math]::Max([Math]::Abs($Stat.Minute_5), $SmallestValue) - $Stat.Minute_5_Fluctuation)
+                            Minute_5_Fluctuation = $Stat.Minute_5_Fluctuation + $Span_Minute_5 * ([Math]::Min([Math]::Abs($Value - $Stat.Minute_5) / [Math]::Max([Math]::Abs($Stat.Minute_5), $SmallestValue), 1) - $Stat.Minute_5_Fluctuation)
                             Minute_10 = $Stat.Minute_10 + $Span_Minute_10 * ($Value - $Stat.Minute_10)
-                            Minute_10_Fluctuation = $Stat.Minute_10_Fluctuation + $Span_Minute_10 * ([Math]::Abs($Value - $Stat.Minute_10) / [Math]::Max([Math]::Abs($Stat.Minute_10), $SmallestValue) - $Stat.Minute_10_Fluctuation)
+                            Minute_10_Fluctuation = $Stat.Minute_10_Fluctuation + $Span_Minute_10 * ([Math]::Min([Math]::Abs($Value - $Stat.Minute_10) / [Math]::Max([Math]::Abs($Stat.Minute_10), $SmallestValue), 1) - $Stat.Minute_10_Fluctuation)
                             Hour = $Stat.Hour + $Span_Hour * ($Value - $Stat.Hour)
-                            Hour_Fluctuation = $Stat.Hour_Fluctuation + $Span_Hour * ([Math]::Abs($Value - $Stat.Hour) / [Math]::Max([Math]::Abs($Stat.Hour), $SmallestValue) - $Stat.Hour_Fluctuation)
+                            Hour_Fluctuation = $Stat.Hour_Fluctuation + $Span_Hour * ([Math]::Min([Math]::Abs($Value - $Stat.Hour) / [Math]::Max([Math]::Abs($Stat.Hour), $SmallestValue), 1) - $Stat.Hour_Fluctuation)
                             Day = $Stat.Day + $Span_Day * ($Value - $Stat.Day)
-                            Day_Fluctuation = $Stat.Day_Fluctuation + $Span_Day * ([Math]::Abs($Value - $Stat.Day) / [Math]::Max([Math]::Abs($Stat.Day), $SmallestValue) - $Stat.Day_Fluctuation)
+                            Day_Fluctuation = $Stat.Day_Fluctuation + $Span_Day * ([Math]::Min([Math]::Abs($Value - $Stat.Day) / [Math]::Max([Math]::Abs($Stat.Day), $SmallestValue), 1) - $Stat.Day_Fluctuation)
                             ThreeDay = $Stat.ThreeDay + $Span_ThreeDay * ($Value - $Stat.ThreeDay)
-                            ThreeDay_Fluctuation = $Stat.ThreeDay_Fluctuation + $Span_ThreeDay * ([Math]::Abs($Value - $Stat.ThreeDay) / [Math]::Max([Math]::Abs($Stat.ThreeDay), $SmallestValue) - $Stat.ThreeDay_Fluctuation)
+                            ThreeDay_Fluctuation = $Stat.ThreeDay_Fluctuation + $Span_ThreeDay * ([Math]::Min([Math]::Abs($Value - $Stat.ThreeDay) / [Math]::Max([Math]::Abs($Stat.ThreeDay), $SmallestValue), 1) - $Stat.ThreeDay_Fluctuation)
                             Week = $Stat.Week + $Span_Week * ($Value - $Stat.Week)
-                            Week_Fluctuation = $Stat.Week_Fluctuation + $Span_Week * ([Math]::Abs($Value - $Stat.Week) / [Math]::Max([Math]::Abs($Stat.Week), $SmallestValue) - $Stat.Week_Fluctuation)
+                            Week_Fluctuation = $Stat.Week_Fluctuation + $Span_Week * ([Math]::Min([Math]::Abs($Value - $Stat.Week) / [Math]::Max([Math]::Abs($Stat.Week), $SmallestValue), 1) - $Stat.Week_Fluctuation)
                             Duration = $Stat.Duration + $Duration
                             Updated = $Updated
                             Failed = [Math]::Max($Stat.Failed-1,0)
@@ -321,6 +395,7 @@ function Set-Stat {
                             Actual24h_Week     = $Stat.Actual24h_Week + $Span_Day * ($Actual24h - $Stat.Actual24h_Week)
                             Estimate24h_Week   = $Stat.Estimate24h_Week + $Span_Day * ($Estimate24h - $Stat.Estimate24h_Week)
                             ErrorRatio         = $Stat.ErrorRatio
+                            Deviation_Streak   = $StatDeviationStreak
                         }
                         Break
                     }
@@ -328,22 +403,25 @@ function Set-Stat {
                         [PSCustomObject]@{
                             Live = $Value
                             Minute = $Stat.Minute + $Span_Minute * ($Value - $Stat.Minute)
-                            Minute_Fluctuation = $Stat.Minute_Fluctuation + $Span_Minute * ([Math]::Abs($Value - $Stat.Minute) / [Math]::Max([Math]::Abs($Stat.Minute), $SmallestValue) - $Stat.Minute_Fluctuation)
+                            Minute_Fluctuation = $Stat.Minute_Fluctuation + $Span_Minute * ([Math]::Min([Math]::Abs($Value - $Stat.Minute) / [Math]::Max([Math]::Abs($Stat.Minute), $SmallestValue), 1) - $Stat.Minute_Fluctuation)
                             Minute_5 = $Stat.Minute_5 + $Span_Minute_5 * ($Value - $Stat.Minute_5)
-                            Minute_5_Fluctuation = $Stat.Minute_5_Fluctuation + $Span_Minute_5 * ([Math]::Abs($Value - $Stat.Minute_5) / [Math]::Max([Math]::Abs($Stat.Minute_5), $SmallestValue) - $Stat.Minute_5_Fluctuation)
+                            Minute_5_Fluctuation = $Stat.Minute_5_Fluctuation + $Span_Minute_5 * ([Math]::Min([Math]::Abs($Value - $Stat.Minute_5) / [Math]::Max([Math]::Abs($Stat.Minute_5), $SmallestValue), 1) - $Stat.Minute_5_Fluctuation)
                             Minute_10 = $Stat.Minute_10 + $Span_Minute_10 * ($Value - $Stat.Minute_10)
-                            Minute_10_Fluctuation = $Stat.Minute_10_Fluctuation + $Span_Minute_10 * ([Math]::Abs($Value - $Stat.Minute_10) / [Math]::Max([Math]::Abs($Stat.Minute_10), $SmallestValue) - $Stat.Minute_10_Fluctuation)
+                            Minute_10_Fluctuation = $Stat.Minute_10_Fluctuation + $Span_Minute_10 * ([Math]::Min([Math]::Abs($Value - $Stat.Minute_10) / [Math]::Max([Math]::Abs($Stat.Minute_10), $SmallestValue), 1) - $Stat.Minute_10_Fluctuation)
                             Hour = $Stat.Hour + $Span_Hour * ($Value - $Stat.Hour)
-                            Hour_Fluctuation = $Stat.Hour_Fluctuation + $Span_Hour * ([Math]::Abs($Value - $Stat.Hour) / [Math]::Max([Math]::Abs($Stat.Hour), $SmallestValue) - $Stat.Hour_Fluctuation)
+                            Hour_Fluctuation = $Stat.Hour_Fluctuation + $Span_Hour * ([Math]::Min([Math]::Abs($Value - $Stat.Hour) / [Math]::Max([Math]::Abs($Stat.Hour), $SmallestValue), 1) - $Stat.Hour_Fluctuation)
                             Day = $Stat.Day + $Span_Day * ($Value - $Stat.Day)
-                            Day_Fluctuation = $Stat.Day_Fluctuation + $Span_Day * ([Math]::Abs($Value - $Stat.Day) / [Math]::Max([Math]::Abs($Stat.Day), $SmallestValue) - $Stat.Day_Fluctuation)
+                            Day_Fluctuation = $Stat.Day_Fluctuation + $Span_Day * ([Math]::Min([Math]::Abs($Value - $Stat.Day) / [Math]::Max([Math]::Abs($Stat.Day), $SmallestValue), 1) - $Stat.Day_Fluctuation)
                             ThreeDay = $Stat.ThreeDay + $Span_ThreeDay * ($Value - $Stat.ThreeDay)
-                            ThreeDay_Fluctuation = $Stat.ThreeDay_Fluctuation + $Span_ThreeDay * ([Math]::Abs($Value - $Stat.ThreeDay) / [Math]::Max([Math]::Abs($Stat.ThreeDay), $SmallestValue) - $Stat.ThreeDay_Fluctuation)
+                            ThreeDay_Fluctuation = $Stat.ThreeDay_Fluctuation + $Span_ThreeDay * ([Math]::Min([Math]::Abs($Value - $Stat.ThreeDay) / [Math]::Max([Math]::Abs($Stat.ThreeDay), $SmallestValue), 1) - $Stat.ThreeDay_Fluctuation)
                             Week = $Stat.Week + $Span_Week * ($Value - $Stat.Week)
-                            Week_Fluctuation = $Stat.Week_Fluctuation + $Span_Week * ([Math]::Abs($Value - $Stat.Week) / [Math]::Max([Math]::Abs($Stat.Week), $SmallestValue) - $Stat.Week_Fluctuation)
+                            Week_Fluctuation = $Stat.Week_Fluctuation + $Span_Week * ([Math]::Min([Math]::Abs($Value - $Stat.Week) / [Math]::Max([Math]::Abs($Stat.Week), $SmallestValue), 1) - $Stat.Week_Fluctuation)
                             Duration = $Stat.Duration + $Duration
                             Updated = $Updated
                             Failed = [Math]::Max($Stat.Failed-1,0)
+                            Failed_Value = if ($StatKeepStreak) {$Stat.Failed_Value} else {0}
+                            Failed_Streak = if ($StatKeepStreak) {$Stat.Failed_Streak} else {0}
+                            Deviation_Streak = $StatDeviationStreak
 
                             # Profit part
                             PowerDraw_Live     = $PowerDraw
@@ -355,7 +433,18 @@ function Set-Stat {
             }
         }
         catch {
-            if (-not $Quiet -and (Test-Path $Path)) {Write-Log -Level Warn "Stat file ($Name) is corrupt and will be reset. "}
+            if (-not $Quiet -and (Test-Path $Path)) {
+                # the two deliberate resets above throw as well, give them their own words: "corrupt" is for files that really cannot be read
+                if ("$($_.Exception.Message)" -match "^Fluctuation out of range") {
+                    Write-Log -Level Warn "Stat file ($Name) will be reset, because its values fluctuate too much (week fluctuation $([Math]::Round([Double]$Stat.Week_Fluctuation * 100))%). "
+                } elseif ("$($_.Exception.Message)" -match "^Deviation out of range") {
+                    Write-Log -Level Warn "Stat file ($Name) will be reset, because its values stayed more than 5x off the average for $([Int]$Stat.Deviation_Streak) rounds. "
+                } elseif ($ResetIfZero -and $Stat -and -not $Stat.Live) {
+                    Write-Log -Level Warn "Stat file ($Name) will be reset, because its last value is zero. "
+                } else {
+                    Write-Log -Level Warn "Stat file ($Name) is corrupt and will be reset. "
+                }
+            }
             $Stat = $null
         }
     }
@@ -393,6 +482,8 @@ function Set-Stat {
                     Version            = $Version
                     LogFile            = $LogFile
                     IsFL               = $IsFastlaneValue
+                    Failed_Value       = 0
+                    Failed_Streak      = 0
                     #Ratio_Average      = $Ratio
                 }
                 Break
@@ -428,6 +519,7 @@ function Set-Stat {
                     Actual24h_Week     = 0
                     Estimate24h_Week   = 0
                     ErrorRatio         = 0
+                    Deviation_Streak   = 0
                 }
                 Break
             }
@@ -451,6 +543,9 @@ function Set-Stat {
                     Duration = $Duration
                     Updated = $Updated
                     Failed = 0
+                    Failed_Value = 0
+                    Failed_Streak = 0
+                    Deviation_Streak = 0
 
                     # Profit part
                     PowerDraw_Live     = $PowerDraw
@@ -502,6 +597,8 @@ function Set-Stat {
                     Version            = [String]$Stat.Version
                     LogFile            = [String]$Stat.LogFile
                     IsFL               = [Bool]$Stat.IsFL
+                    Failed_Value       = [Double]$Stat.Failed_Value
+                    Failed_Streak      = [Int]$Stat.Failed_Streak
                     #Ratio_Average      = [Double]$Stat.Ratio_Average
                 }
                 Break
@@ -537,6 +634,7 @@ function Set-Stat {
                     Actual24h_Week     = [Decimal]$Stat.Actual24h_Week
                     Estimate24h_Week   = [Decimal]$Stat.Estimate24h_Week
                     ErrorRatio         = [Decimal]$Stat.ErrorRatio
+                    Deviation_Streak   = [Int]$Stat.Deviation_Streak
                 }
                 Break
             }
@@ -564,6 +662,9 @@ function Set-Stat {
                     # Profit part
                     PowerDraw_Live     = [Decimal]$Stat.PowerDraw_Live
                     PowerDraw_Average  = [Double]$Stat.PowerDraw_Average
+                    Failed_Value       = [Double]$Stat.Failed_Value
+                    Failed_Streak      = [Int]$Stat.Failed_Streak
+                    Deviation_Streak   = [Int]$Stat.Deviation_Streak
                 }
             }
         }
@@ -717,6 +818,41 @@ function Get-Stat {
         $MatchStr = if ($MatchArray.Count -gt 1) {$MatchArray -join "|"} else {$MatchArray}
         if ($MatchStr -match "|") {$MatchStr = "($MatchStr)"}
 
+        # miner stats are only cached for devices the system detects: a stat
+        # file names its devices (BzMiner-GPU#00-GPU#01_KawPOW_HashRate), and a
+        # rig accumulates files for every device set it ever ran - a card that
+        # dropped out for a while leaves the sets of the remaining cards behind
+        # for good. Every set of detected devices stays, selected or not: the
+        # benchmark seeding in Invoke-Core takes sibling sets of the same model
+        # as its source, and it rejects a set naming an undetected device by
+        # the same rule. The files stay untouched, so a returning card gets its
+        # stats back on the next pass
+        $PresentDevices = $null
+        if ($Miners -and $Cached -and (Test-Path Variable:Global:GlobalCachedDevices) -and $Global:GlobalCachedDevices) {
+            $PresentDevices = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($Device in $Global:GlobalCachedDevices) {if ($Device.Name) {[void]$PresentDevices.Add($Device.Name)}}
+            if (-not $PresentDevices.Count) {$PresentDevices = $null}
+        }
+
+        # a pass that cannot find anything new is skipped: with the folder
+        # unchanged and the same devices the cache already mirrors the folder.
+        # The result is only requested by callers that need it (-Quiet is the
+        # per-round refresh), so the skip is limited to those. The stamp is
+        # armed only once the folder has been quiet for a few seconds: on a
+        # file system with coarse timestamps (ext3, FAT) a later change could
+        # otherwise land in the same window as the recorded one
+        if ($Miners -and $Cached -and $Quiet) {
+            $Stamp = $null
+            try {
+                $StatsDirWrite = (Get-Item $Path -ErrorAction Stop).LastWriteTimeUtc
+                if (((Get-Date).ToUniversalTime() - $StatsDirWrite).TotalSeconds -gt 3) {
+                    $Stamp = "$($StatsDirWrite.Ticks)|$(if ($PresentDevices) {@($PresentDevices | Sort-Object) -join ","})"
+                }
+            } catch {}
+            if ($Stamp -and $Stamp -eq $Script:MinerStatsStamp) {return}
+            $Script:MinerStatsStamp = $Stamp
+        }
+
         foreach($p in (Get-ChildItem -Recurse $Path -File -Filter "*.txt")) {
             $BaseName = $p.BaseName
             $FullName = $p.FullName
@@ -724,13 +860,24 @@ function Get-Stat {
 
             $NewStatsKey = $BaseName -replace "^(AMD|CPU|INTEL|NVIDIA)-"
 
+            if ($PresentDevices) {
+                # the device names sit between the miner name and the first "_"
+                $StatDevices = [regex]::Matches($NewStatsKey.Substring(0, [Math]::Max(0, $NewStatsKey.IndexOf("_"))), "(?:GPU|CPU)#\d+")
+                $StatDeviceMissing = $false
+                foreach ($StatDevice in $StatDevices) {
+                    if (-not $PresentDevices.Contains($StatDevice.Value)) {$StatDeviceMissing = $true; break}
+                }
+                if ($StatDeviceMissing) {continue}
+            }
+
             if ($Stat = Get-StatFromFile -Path $FullName -Name $NewStatsKey -Cached:$Cached -Check $Check) {
                 $NewStats[$NewStatsKey] = $Stat
             }
         }
         if ($Cached) {
-            $RemoveKeys = (Compare-Object @($NewStats.Keys | Select-Object) @($Global:StatsCache.Keys | Where {$_ -match "_$MatchStr$"} | Select-Object)) | Where-Object {$_.SideIndicator -eq "=>"} | Foreach-Object {$_.InputObject}
-            $RemoveKeys | Foreach-Object {[void]$Global:StatsCache.Remove($_)}
+            foreach ($CacheKey in @($Global:StatsCache.Keys)) {
+                if ($CacheKey -match "_$MatchStr$" -and -not $NewStats.ContainsKey($CacheKey)) {[void]$Global:StatsCache.Remove($CacheKey)}
+            }
         }
         if (-not $Quiet) {$NewStats}
     }
@@ -912,4 +1059,217 @@ function Remove-MinerStatsBackup {
     if (-not ($ZipPath = Get-MinerStatsBackupPath -Name $Name)) {throw "Backup $Name not found"}
     [System.IO.File]::Delete($ZipPath)
     Write-Log "Miner stats backup $Name deleted"
+}
+
+function Update-MinerAlgorithmsInfo {
+    # algorithms per miner module for the stats cleanup (Get-MinerStatsStale):
+    # the normalized main and secondary algorithms of the module's InfoOnly
+    # command list, keyed by module name and stamped with the module file's
+    # write time, so an updated module is read again. Stored in
+    # Data\mineralgorithms.json next to minerinfo.json. A module without a
+    # command list (custom miners, a module that fails) gets no entry, and the
+    # cleanup then never lists its benchmarks as "algorithm"
+    [CmdletBinding()]
+    param()
+
+    $Path = ".\Data\mineralgorithms.json"
+    $Info = [hashtable]@{}
+    if (Test-Path $Path) {
+        try {
+            (Get-ContentByStreamReader $Path | ConvertFrom-Json -ErrorAction Ignore).PSObject.Properties | Foreach-Object {$Info[$_.Name] = $_.Value}
+        } catch {
+            $Info = [hashtable]@{}
+        }
+    }
+
+    $Changed = $false
+    $Avail = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($Name in @($Session.AvailMiners | Where-Object {$_})) {[void]$Avail.Add($Name)}
+    foreach ($Name in @($Info.Keys)) {
+        if (-not $Avail.Contains($Name)) {[void]$Info.Remove($Name); $Changed = $true}
+    }
+    foreach ($Name in $Avail) {
+        $File = Get-Item ".\Miners\$($Name).ps1" -ErrorAction Ignore
+        if (-not $File) {continue}
+        $Stamp = "$($File.LastWriteTimeUtc.Ticks)"
+        if ($Info[$Name] -and "$($Info[$Name].Stamp)" -eq $Stamp) {continue}
+        $Algorithms = @()
+        try {
+            $Algorithms = @(Get-MinersContent -MinerName $Name -Parameters @{InfoOnly = $true} | Foreach-Object {$_.Commands} | Where-Object {$_ -ne $null -and $_ -isnot [string] -and "$($_.MainAlgorithm)".Trim() -ne ""} | Foreach-Object {
+                Get-Algorithm "$($_.MainAlgorithm)".Trim()
+                foreach ($Second in @($_.SecondaryAlgorithm, $_.SecondAlgorithm)) {
+                    if ("$Second".Trim() -ne "") {Get-Algorithm "$Second".Trim()}
+                }
+            } | Where-Object {$_} | Sort-Object -Unique)
+        } catch {
+            if ($Error.Count){$Error.RemoveAt(0)}
+            $Algorithms = @()
+        }
+        if ($Algorithms.Count) {
+            $Info[$Name] = [PSCustomObject]@{Stamp = $Stamp; Algorithms = $Algorithms}
+        } elseif ($Info[$Name]) {
+            [void]$Info.Remove($Name)
+        } else {
+            continue
+        }
+        $Changed = $true
+    }
+    if ($Changed) {Set-ContentJson -PathToFile $Path -Data $Info -Compress > $null}
+    $Info
+}
+
+function Get-MinerStatsStale {
+    # benchmarks that cannot be used any more and that have not been updated
+    # for -Days: a rig keeps the stat file of every miner, device set and
+    # algorithm it ever benchmarked. Each file gets the first matching reason:
+    #   device    - names a device the system does not detect
+    #   miner     - the miner module does not exist
+    #   algorithm - the miner module does not list this algorithm any more
+    #   set       - the device set is neither a model group of the detected
+    #               devices nor a combination of model groups (e.g. the sets
+    #               of the remaining cards while one had dropped out)
+    # Nothing here depends on the current miner list, the pools or exclusions:
+    # a miner or algorithm that is merely not offered right now stays. Reasons
+    # without their input (no devices, no miner list, no algorithm list) are
+    # skipped
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [Int]$Days = 30,
+        [Parameter(Mandatory = $false)]
+        $Devices = $null,
+        [Parameter(Mandatory = $false)]
+        [String[]]$AvailMiners = @(),
+        [Parameter(Mandatory = $false)]
+        $MinerAlgorithms = $null
+    )
+
+    $StatsPath = $Global:ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(".\Stats\Miners")
+    if (-not [System.IO.Directory]::Exists($StatsPath)) {return}
+
+    # detected device names, and the device sets a miner instance can have:
+    # every model group and every combination of model groups
+    $DeviceNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $ValidSets   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $Groups = @{}
+    foreach ($Device in @($Devices)) {
+        if (-not $Device.Name) {continue}
+        [void]$DeviceNames.Add($Device.Name)
+        $Model = "$($Device.Model)"
+        if (-not $Groups.ContainsKey($Model)) {$Groups[$Model] = [System.Collections.Generic.List[string]]::new()}
+        if (-not $Groups[$Model].Contains($Device.Name)) {[void]$Groups[$Model].Add($Device.Name)}
+    }
+    $GroupList = @($Groups.Values)
+    if ($GroupList.Count -gt 0 -and $GroupList.Count -le 10) {
+        for ($Mask = 1; $Mask -lt [Math]::Pow(2, $GroupList.Count); $Mask++) {
+            $Members = [System.Collections.Generic.List[string]]::new()
+            for ($Bit = 0; $Bit -lt $GroupList.Count; $Bit++) {
+                if ($Mask -band (1 -shl $Bit)) {$Members.AddRange($GroupList[$Bit])}
+            }
+            [void]$ValidSets.Add((@($Members | Sort-Object) -join "-"))
+        }
+    } else {
+        foreach ($Group in $GroupList) {[void]$ValidSets.Add((@($Group | Sort-Object) -join "-"))}
+        if ($DeviceNames.Count) {[void]$ValidSets.Add((@($DeviceNames | Sort-Object) -join "-"))}
+    }
+
+    $Avail = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($Miner in $AvailMiners) {if ($Miner) {[void]$Avail.Add($Miner)}}
+
+    # algorithms per module: hashtable or object from Data\mineralgorithms.json
+    $Algos = @{}
+    if ($MinerAlgorithms -is [hashtable]) {
+        foreach ($Key in $MinerAlgorithms.Keys) {if ($MinerAlgorithms[$Key].Algorithms) {$Algos[$Key] = @($MinerAlgorithms[$Key].Algorithms)}}
+    } elseif ($MinerAlgorithms) {
+        foreach ($Property in $MinerAlgorithms.PSObject.Properties) {if ($Property.Value.Algorithms) {$Algos[$Property.Name] = @($Property.Value.Algorithms)}}
+    }
+
+    $Limit = (Get-Date).AddDays(-$Days)
+
+    foreach ($File in @([System.IO.Directory]::GetFiles($StatsPath, "*_HashRate.txt") | Sort-Object)) {
+        $FileName = [System.IO.Path]::GetFileName($File)
+        if ($FileName -notmatch '^(?:AMD|CPU|INTEL|NVIDIA)-(.+?)((?:-(?:GPU|CPU)#\d+)+)_([^_]+)_HashRate\.txt$') {continue}
+        $StatMiner   = $Matches[1]
+        $StatDevices = @($Matches[2].TrimStart('-') -split '-')
+        $StatAlgo    = $Matches[3]
+
+        # a dual mining instance carries its algorithms in the name
+        # (BzMiner-Autolykos2-SHA512256d-GPU#05): the miner is the longest
+        # leading part that is a known module
+        $StatBase = $StatMiner
+        if ($Avail.Count -and -not $Avail.Contains($StatBase)) {
+            $StatParts = $StatMiner -split '-'
+            for ($StatIndex = $StatParts.Count - 1; $StatIndex -gt 0; $StatIndex--) {
+                $StatCandidate = $StatParts[0..($StatIndex - 1)] -join '-'
+                if ($Avail.Contains($StatCandidate)) {$StatBase = $StatCandidate; break}
+            }
+        }
+
+        $Reason = ""
+        if ($DeviceNames.Count) {
+            foreach ($StatDevice in $StatDevices) {
+                if (-not $DeviceNames.Contains($StatDevice)) {$Reason = "device"; break}
+            }
+        }
+        if (-not $Reason -and $Avail.Count -and -not $Avail.Contains($StatBase)) {$Reason = "miner"}
+        if (-not $Reason -and $Algos.ContainsKey($StatBase) -and $Algos[$StatBase] -notcontains $StatAlgo) {$Reason = "algorithm"}
+        if (-not $Reason -and $ValidSets.Count -and -not $ValidSets.Contains((@($StatDevices | Sort-Object) -join "-"))) {$Reason = "set"}
+        if (-not $Reason) {continue}
+
+        $Info = [System.IO.FileInfo]::new($File)
+        if ($Info.LastWriteTime -gt $Limit) {continue}
+
+        [PSCustomObject]@{
+            Name      = $FileName
+            Miner     = $StatBase
+            Instance  = $StatMiner
+            Devices   = $StatDevices -join "-"
+            Algorithm = $StatAlgo
+            Reason    = $Reason
+            Updated   = $Info.LastWriteTime.ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss")
+            Age       = [Math]::Floor(((Get-Date) - $Info.LastWriteTime).TotalDays)
+            Size      = $Info.Length
+        }
+    }
+}
+
+function Remove-MinerStatsStale {
+    # deletes the named benchmark files, a backup of all current benchmarks is
+    # taken first ("beforecleanup"), so the cleanup can be undone with a restore
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [String[]]$Names
+    )
+
+    $StatsPath = $Global:ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(".\Stats\Miners")
+
+    # only names this module creates: no path parts can sneak in
+    $Files = [System.Collections.Generic.List[string]]::new()
+    foreach ($Name in @($Names | Select-Object -Unique)) {
+        $Name = "$Name".Trim()
+        if ($Name -notmatch '^(?:AMD|CPU|INTEL|NVIDIA)-[^\\/:*?"<>|]+_HashRate\.txt$') {continue}
+        $File = [System.IO.Path]::Combine($StatsPath, $Name)
+        if ([System.IO.File]::Exists($File)) {[void]$Files.Add($File)}
+    }
+    if (-not $Files.Count) {throw "None of the benchmarks exists"}
+
+    $Saved = (New-MinerStatsBackup -Tag "beforecleanup").Name
+
+    $Count = 0
+    foreach ($File in $Files) {
+        try {
+            [System.IO.File]::Delete($File)
+            $Count++
+        } catch {
+            Write-Log -Level Warn "Miner stats cleanup: $([System.IO.Path]::GetFileName($File)) not deleted: $($_.Exception.Message)"
+            continue
+        }
+        # the running round keeps its cached values; the next round reloads the folder
+        $Key = [System.IO.Path]::GetFileNameWithoutExtension($File) -replace "^(AMD|CPU|INTEL|NVIDIA)-"
+        if ($Global:StatsCache.ContainsKey($Key)) {[void]$Global:StatsCache.Remove($Key)}
+    }
+
+    Write-Log "Miner stats cleanup deleted $Count benchmarks, previous stats saved as $Saved"
+    [PSCustomObject]@{Files = $Count; Saved = $Saved}
 }

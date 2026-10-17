@@ -1784,7 +1784,11 @@ function Set-ContentJson {
         try {
             $Exists = $false
             if ([System.IO.File]::Exists($PathToFile)) {
-                    if ((Get-ChildItem $PathToFile -File).IsReadOnly) {
+                    # Windows only: on Linux .NET derives IsReadOnly from the mode bits of the caller's uid class
+                    # with no exception for root, so root over a user-owned 644 file (a Config folder copied from
+                    # another rig, a Docker bind mount) would be refused although it can write. The Open below is
+                    # the real test there
+                    if ($IsWindows -and (Get-ChildItem $PathToFile -File).IsReadOnly) {
                         if (-not $Quiet) {Write-Log -Level Warn "Unable to write to read-only file $PathToFile"}
                         return $false
                     }
@@ -2270,14 +2274,22 @@ function Initialize-DLLs {
 
     Get-ChildItem -Path $CSFolder -Filter $CSFileName -File | ForEach-Object {
         $CSFile = $_.FullName
-        $DLLFile = Join-Path $DLLFolder "$($_.BaseName)_$($PSVersionTable.PSVersion).dll"
+        $CSBaseName = $_.BaseName
+
+        # the DLL name carries a hash of its source: a .cs that arrives with an update keeps the write time of the release
+        # archive, which can be older than a DLL the rig built from the previous source, so the write times alone cannot
+        # tell a stale DLL from a current one (a stale RBMToolBox makes every typed stat look corrupt)
+        $CSHash = $null
+        try {$CSHash = (Get-FileHash $CSFile -Algorithm SHA256 -ErrorAction Stop).Hash.Substring(0,8).ToLower()} catch {}
+        $DLLName = "$($CSBaseName)_$($PSVersionTable.PSVersion)$(if ($CSHash) {"_$($CSHash)"}).dll"
+        $DLLFile = Join-Path $DLLFolder $DLLName
+
+        Get-ChildItem -Path $DLLFolder -Filter "$($CSBaseName)_$($PSVersionTable.PSVersion)*.dll" -File -ErrorAction Ignore | Where-Object {$_.Name -ne $DLLName} | Foreach-Object {Remove-Item $_.FullName -Force -ErrorAction Ignore}
 
         # Check if the DLL needs to be rebuilt
         $NeedsRebuild = $true
         if (Test-Path $DLLFile) {
-            $CSLastWrite = (Get-Item $CSFile).LastWriteTime
-            $DLLLastWrite = (Get-Item $DLLFile).LastWriteTime
-            if ($DLLLastWrite -gt $CSLastWrite) {
+            if ($CSHash -or ((Get-Item $DLLFile).LastWriteTime -gt (Get-Item $CSFile).LastWriteTime)) {
                 try {
                     Add-Type -Path $DLLFile -ErrorAction Stop
                     $NeedsRebuild = $false
